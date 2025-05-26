@@ -2,10 +2,11 @@
 Configuration file for the DELAG project.
 """
 import os
+import numpy as np
 
 # --- User Defined Paths for a Single ROI --- 
 # Base directory containing all ROI folders
-BASE_DATA_DIR = "/mnt/ssd1tb/code/nhatvm/data_lst_16days/" # USER TO VERIFY/SET THIS
+BASE_DATA_DIR = "/mnt/ssd1tb/code/nhatvm/DELAG/DELAG_LST/" # USER TO VERIFY/SET THIS
 
 # Name of the specific ROI folder to process from BASE_DATA_DIR
 ROI_NAME = "KhanhXuan_BuonMaThuot_DakLak" # USER TO SET THIS to one of the subfolders
@@ -35,11 +36,11 @@ TARGET_RESOLUTION = 30  # meters
 START_DATE = "2023-01-01" # Example, user should define for the ROI
 END_DATE = "2024-12-31" # Example, user should define for the ROI
 DAYS_OF_YEAR = 365 # Assuming non-leap year for simplicity in ATC, adjust if needed
-LST_NODATA_VALUE = -9999 # Value indicating no data or cloud in LST files
-S2_NODATA_VALUE = -9999 # NoData value in S2 files
+LST_NODATA_VALUE = np.nan # Value indicating no data or cloud in LST files
+S2_NODATA_VALUE = np.nan # NoData value in S2 files
 
 # --- ATC Model Hyperparameters ---
-ATC_LEARNING_RATE = 0.1
+ATC_LEARNING_RATE = 0.001
 ATC_EPOCHS = 1200
 ATC_ENSEMBLE_SNAPSHOTS = 200
 ATC_SNAPSHOT_INTERVAL = 4 # Save every 4 epochs

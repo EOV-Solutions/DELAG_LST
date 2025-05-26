@@ -98,6 +98,9 @@ def train_atc_model_pixelwise(
         loss = criterion(predictions, lst_tensor)
         
         loss.backward()
+        if torch.isnan(loss).any():
+            print(f"  ATC_MODEL_DIAGNOSTIC: NaN loss at epoch {epoch} for a pixel. Stopping training for this pixel.")
+            return None, []
         optimizer.step()
 
         # Store snapshots for ensemble
@@ -180,16 +183,23 @@ def train_all_atc_models(preprocessed_data: dict, app_config: 'config') -> tuple
             pixel_doy_clear = pixel_doy_clear[valid_data_mask]
             pixel_era5_clear = pixel_era5_clear[valid_data_mask]
 
+            if np.isnan(pixel_lst_clear).any() or np.isnan(pixel_doy_clear).any() or np.isnan(pixel_era5_clear).any():
+                print(f"  ATC_MODEL_DIAGNOSTIC: NaNs detected in inputs to train_atc_model_pixelwise for pixel ({r},{c}) AFTER filtering. Skipping.")
+                print(f"    NaNs in pixel_lst_clear: {np.isnan(pixel_lst_clear).sum()}")
+                print(f"    NaNs in pixel_doy_clear: {np.isnan(pixel_doy_clear).sum()}")
+                print(f"    NaNs in pixel_era5_clear: {np.isnan(pixel_era5_clear).sum()}")
+                continue
+
             if len(pixel_lst_clear) < 10:
                 # print(f"Skipping pixel ({r},{c}) after NaN filter: {len(pixel_lst_clear)} points")
                 continue
             
-            _, model_snapshots = train_atc_model_pixelwise(
+            trained_model_pixel, model_snapshots = train_atc_model_pixelwise(
                 pixel_lst_clear, pixel_doy_clear, pixel_era5_clear, app_config
             )
 
-            if not model_snapshots:
-                # print(f"No model snapshots for pixel ({r},{c})")
+            if not trained_model_pixel or not model_snapshots:
+                # print(f"No model snapshots or training failed for pixel ({r},{c})")
                 continue
 
             # Generate predictions for all time steps using the ensemble of snapshots
@@ -198,6 +208,8 @@ def train_all_atc_models(preprocessed_data: dict, app_config: 'config') -> tuple
             
             # Prepare ERA5 data for this pixel for all prediction time steps
             pixel_era5_for_prediction = era5_for_prediction[:, r, c] # (time,)
+            if torch.isnan(pixel_era5_for_prediction).any():
+                print(f"  ATC_MODEL_DIAGNOSTIC: NaNs found in pixel_era5_for_prediction for pixel ({r},{c}). Predictions for this pixel might contain NaNs.")
             
             for snapshot_params in model_snapshots:
                 # Load parameters into the temporary model

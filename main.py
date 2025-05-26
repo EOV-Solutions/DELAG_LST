@@ -62,6 +62,22 @@ def main():
         traceback.print_exc()
         return
     print("ATC model processing completed.")
+    # --- START DIAGNOSTIC BLOCK FOR ATC ---
+    if 'lst_stack' in preprocessed_data and atc_mean_predictions is not None:
+        nan_in_lst_stack = np.isnan(preprocessed_data['lst_stack'])
+        nan_in_atc_pred = np.isnan(atc_mean_predictions)
+        total_nan_in_lst = np.sum(nan_in_lst_stack)
+        total_nan_in_atc = np.sum(nan_in_atc_pred)
+        print(f"  DIAGNOSTIC: Total NaNs in input LST stack: {total_nan_in_lst}")
+        print(f"  DIAGNOSTIC: Total NaNs in ATC mean predictions: {total_nan_in_atc}")
+        if total_nan_in_lst > 0 and total_nan_in_atc > 0:
+            matching_nans_atc = np.sum(nan_in_lst_stack & nan_in_atc_pred)
+            print(f"  DIAGNOSTIC: NaN locations in LST stack that are also NaN in ATC predictions: {matching_nans_atc}")
+            if matching_nans_atc > 0 and matching_nans_atc == total_nan_in_atc and matching_nans_atc >= np.sum(nan_in_lst_stack): # Check if all NaNs in ATC are from LST
+                 print("  WARNING: ATC predictions appear to carry over NaNs from the input LST stack. Gap-filling by ATC may not be effective.")
+        elif total_nan_in_atc == 0 and total_nan_in_lst > 0:
+            print("  INFO: ATC predictions do not contain NaNs, suggesting it might be performing gap-filling.")
+    # --- END DIAGNOSTIC BLOCK FOR ATC ---
 
     # 3. Train GP Model for Residuals and Get Predictions/Variance
     print("\nStep 3: GP Model Training and Prediction for Residuals")
@@ -98,6 +114,22 @@ def main():
         traceback.print_exc()
         return
     print("Final reconstruction and uncertainty quantification completed.")
+    # --- START DIAGNOSTIC BLOCK FOR RECONSTRUCTION ---
+    if 'lst_stack' in preprocessed_data and reconstructed_lst is not None:
+        nan_in_lst_stack = np.isnan(preprocessed_data['lst_stack'])
+        nan_in_reconstructed = np.isnan(reconstructed_lst)
+        total_nan_in_lst = np.sum(nan_in_lst_stack)
+        total_nan_in_reconstructed = np.sum(nan_in_reconstructed)
+        print(f"  DIAGNOSTIC: Total NaNs in input LST stack: {total_nan_in_lst}")
+        print(f"  DIAGNOSTIC: Total NaNs in final reconstructed LST: {total_nan_in_reconstructed}")
+        if total_nan_in_lst > 0 and total_nan_in_reconstructed > 0:
+            matching_nans_reconstructed = np.sum(nan_in_lst_stack & nan_in_reconstructed)
+            print(f"  DIAGNOSTIC: NaN locations in LST stack that are also NaN in reconstructed LST: {matching_nans_reconstructed}")
+            if matching_nans_reconstructed > 0 and matching_nans_reconstructed == total_nan_in_reconstructed and matching_nans_reconstructed >= np.sum(nan_in_lst_stack):
+                print("  WARNING: Final reconstructed LST appears to carry over NaNs from the input LST stack. Overall gap-filling may not be effective.")
+        elif total_nan_in_reconstructed == 0 and total_nan_in_lst > 0:
+             print("  INFO: Final reconstructed LST does not contain NaNs, suggesting pipeline might be performing gap-filling.")
+    # --- END DIAGNOSTIC BLOCK FOR RECONSTRUCTION ---
 
     # 5. Save Reconstructed LST and Uncertainty Products
     print("\nStep 5: Saving Outputs")
@@ -139,12 +171,28 @@ def main():
         traceback.print_exc()
         # Continue to evaluation even if saving fails for some reason
 
+    # 6. Evaluate Model Performance
+    print("\nStep 6: Model Evaluation")
+    try:
+        all_eval_metrics = evaluation.run_all_evaluations(
+            reconstructed_lst=reconstructed_lst,
+            observed_lst_clear=preprocessed_data['lst_stack'], # Original LST with NaNs for clouds
+            app_config=config
+        )
+        print("\nFinal Evaluation Metrics:")
+        for k, v in all_eval_metrics.items():
+            print(f"  {k}: {v}")
+    except Exception as e:
+        print(f"Error during model evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+
     # Visualize daily comparison stacks (Observed LST, Reconstructed LST, S2 RGB)
     if reconstructed_lst.shape[0] > 0 and \
        preprocessed_data.get('lst_stack') is not None and \
        preprocessed_data.get('s2_reflectance_stack') is not None and \
        preprocessed_data.get('common_dates'):
-        print("\nVisualizing daily comparison stacks...")
+        print("\nVisualizing daily comparison stacks (Observed LST vs Reconstructed LST)...")
         try:
             # Assuming S2 bands are [B2, B3, B4, B8], so RGB indices are (B4=2, B3=1, B2=0)
             s2_rgb_indices_param = getattr(config, 'S2_RGB_INDICES', (2, 1, 0)) 
@@ -166,22 +214,6 @@ def main():
             traceback.print_exc()
     else:
         print("Skipping daily comparison visualization as not all required data stacks are available.")
-
-    # 6. Evaluate Model Performance
-    print("\nStep 6: Model Evaluation")
-    try:
-        all_eval_metrics = evaluation.run_all_evaluations(
-            reconstructed_lst=reconstructed_lst,
-            observed_lst_clear=preprocessed_data['lst_stack'], # Original LST with NaNs for clouds
-            app_config=config
-        )
-        print("\nFinal Evaluation Metrics:")
-        for k, v in all_eval_metrics.items():
-            print(f"  {k}: {v}")
-    except Exception as e:
-        print(f"Error during model evaluation: {e}")
-        import traceback
-        traceback.print_exc()
     
     print("\nDELAG LST Reconstruction Pipeline Completed.")
 

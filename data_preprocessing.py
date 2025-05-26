@@ -241,7 +241,7 @@ def load_era5_skin_temp(
             utils.align_rasters(reference_grid_path, era5_fpath, temp_aligned_era5_path, 
                                 resampling_method=RasterioResampling.nearest)
             with rasterio.open(temp_aligned_era5_path) as src:
-                era5_data = src.read(1).astype(np.float32)
+                era5_data = src.read(2).astype(np.float32)
                 # Here, ERA5 data could also have its own NoData. If so, convert to NaN.
                 # For now, assume align_rasters handles or it's not an issue for ERA5.
                 # If ERA5 has a specific nodata, it should be converted to np.nan here.
