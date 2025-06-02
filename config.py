@@ -51,6 +51,10 @@ GP_USE_NDVI_FEATURE = True # Set to True to use NDVI as a feature instead of S2 
 # S2_RED_INDEX = 2  # Example: Corresponds to the 3rd band (Red)
 # S2_NIR_INDEX = 3  # Example: Corresponds to the 4th band (NIR)
 
+# --- Spatial Sampling for Training ---
+SPATIAL_TRAINING_SAMPLE_PERCENTAGE = 1.0  # Fraction of pixels to use for training (1.0 = all pixels)
+MIN_PIXELS_FOR_SPATIAL_SAMPLING = 100     # Minimum number of pixels if SPATIAL_TRAINING_SAMPLE_PERCENTAGE < 1.0
+
 # --- ATC Model Hyperparameters ---
 ATC_LEARNING_RATE = 0.001
 ATC_EPOCHS = 1200
@@ -58,7 +62,8 @@ ATC_ENSEMBLE_SNAPSHOTS = 200
 ATC_SNAPSHOT_INTERVAL = 4 # Save every 4 epochs
 ATC_ENSEMBLE_START_EPOCH = ATC_EPOCHS - (ATC_ENSEMBLE_SNAPSHOTS * ATC_SNAPSHOT_INTERVAL)
 MIN_CLEAR_OBS_ATC = 20 # Minimum number of clear sky observations to train an ATC model for a pixel
-ATC_N_JOBS = 4  # Use all available CPU cores for ATC training. Set to 1 for no parallelization, or a specific number e.g., 4.
+ATC_N_JOBS = 32  # Use all available CPU cores for ATC training. Set to 1 for no parallelization, or a specific number e.g., 4.
+ATC_LOSS_LOGGING_INTERVAL = 100 # Log loss every N epochs for map generation
 
 # --- GP Model Hyperparameters ---
 # S2 bands will be annual/period means: Red, Green, Blue, NIR
@@ -69,6 +74,7 @@ GP_LEARNING_RATE_FINAL = 0.005
 GP_EPOCHS_FINAL = 50
 GP_MINI_BATCH_SIZE = 1024
 GP_NUM_INDUCING_POINTS = 512
+GP_LOSS_LOGGING_INTERVAL = 10 # Log GP loss every N epochs for plot
 
 # --- Evaluation Parameters ---
 EVAL_HOLDOUT_PERCENTAGE = 0.20 # For heavily cloudy scenario
@@ -76,4 +82,7 @@ EVAL_HOLDOUT_PERCENTAGE = 0.20 # For heavily cloudy scenario
 
 # --- General ---
 RANDOM_SEED = 42
-DEVICE = "cuda" # "cuda" if GPU is available, else "cpu" 
+DEVICE = "cpu" # "cuda" if GPU is available, else "cpu" 
+
+MODEL_WEIGHTS_PATH = "/mnt/hdd12tb/code/nhatvm/DELAG/DELAG_LST/output/model_weights_directory_temp/"+ROI_NAME # Or any other appropriate path 
+GP_MODEL_WEIGHT_FILENAME = "gp_model_and_likelihood.pth" # Filename for saved GP model 

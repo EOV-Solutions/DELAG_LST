@@ -40,7 +40,8 @@ def create_output_directories(config):
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     os.makedirs(config.RECONSTRUCTED_LST_PATH, exist_ok=True)
     os.makedirs(config.UNCERTAINTY_MAPS_PATH, exist_ok=True)
-    print(f"Output directories created/ensured at {config.OUTPUT_DIR}")
+    os.makedirs(config.MODEL_WEIGHTS_PATH, exist_ok=True)
+    print(f"Output directories created/ensured at {config.OUTPUT_DIR} and model weights at {config.MODEL_WEIGHTS_PATH}")
 
 def resample_raster(input_path: str, output_path: str, target_resolution: tuple[float, float], target_crs: str = None, resampling_method: RasterioResampling = RasterioResampling.nearest):
     """
@@ -334,6 +335,7 @@ def plot_s2_rgb(s2_slice_bands_hw, ax, title="S2 RGB", band_indices_rgb=(2,1,0))
 
 def visualize_daily_stacks_comparison(
     lst_observed_stack: np.ndarray, 
+    model_predicted_lst_stack: np.ndarray,
     reconstructed_lst_stack: np.ndarray, 
     s2_reflectance_stack: np.ndarray, # (time, bands, H, W)
     ndvi_stack: np.ndarray, # (time, H, W), can be None
@@ -351,6 +353,7 @@ def visualize_daily_stacks_comparison(
 
     Args:
         lst_observed_stack (np.ndarray): (time, H, W) stack of observed LST.
+        model_predicted_lst_stack (np.ndarray): (time, H, W) stack of model predicted LST.
         reconstructed_lst_stack (np.ndarray): (time, H, W) stack of reconstructed LST.
         s2_reflectance_stack (np.ndarray): (time, bands, H, W) stack of S2 reflectance.
         ndvi_stack (np.ndarray): (time, H, W) stack of NDVI data, can be None.
@@ -376,48 +379,39 @@ def visualize_daily_stacks_comparison(
         print("No data available to visualize for daily stacks comparison.")
         return
 
-    fig, axes = plt.subplots(3, num_days, figsize=(num_days * 4, 3 * 4), squeeze=False)
+    fig, axes = plt.subplots(4, num_days, figsize=(num_days * 4, 4 * 4), squeeze=False)
     # squeeze=False ensures axes is always 2D, even if num_days=1
     
     plot_title_suffix = "S2 RGB"
     if getattr(app_config, 'GP_USE_NDVI_FEATURE', False) and ndvi_stack is not None:
         plot_title_suffix = "NDVI"
 
-    fig.suptitle(f"Daily Comparison for {roi_name} (Observed LST, Reconstructed LST, {plot_title_suffix})", fontsize=16, y=0.99)
+    fig.suptitle(f"Daily Comparison for {roi_name} (Observed, Predicted, Reconstructed LST, {plot_title_suffix})", fontsize=16, y=0.99)
 
     # Determine common min/max for LST plots for consistent color scaling across days
     valid_obs_lst_values = lst_observed_stack[~np.isnan(lst_observed_stack)]
+    valid_pred_lst_values = model_predicted_lst_stack[~np.isnan(model_predicted_lst_stack)]
     valid_recon_lst_values = reconstructed_lst_stack[~np.isnan(reconstructed_lst_stack)]
     
     lst_min_val, lst_max_val = (270, 320) # Default fallback
 
-    if valid_obs_lst_values.size > 0 and valid_recon_lst_values.size > 0:
-        combined_lst_values = np.concatenate((valid_obs_lst_values, valid_recon_lst_values))
+    # Combine all valid LST values for consistent scaling
+    all_valid_lst_for_scaling = []
+    if valid_obs_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_obs_lst_values)
+    if valid_pred_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_pred_lst_values)
+    if valid_recon_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_recon_lst_values)
+
+    if all_valid_lst_for_scaling:
+        combined_lst_values = np.concatenate(all_valid_lst_for_scaling)
         if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
             p_low, p_high = lst_contrast_percentiles
             lst_min_val = np.percentile(combined_lst_values, p_low)
             lst_max_val = np.percentile(combined_lst_values, p_high)
-            print(f"LST visualization: Using percentile ({p_low}%, {p_high}%) scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
+            print(f"LST visualization (Obs/Pred/Recon): Using percentile ({p_low}%, {p_high}%) scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
         else:
             lst_min_val = np.min(combined_lst_values)
             lst_max_val = np.max(combined_lst_values)
-            print(f"LST visualization: Using absolute min/max scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
-    elif valid_obs_lst_values.size > 0:
-        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
-            p_low, p_high = lst_contrast_percentiles
-            lst_min_val = np.percentile(valid_obs_lst_values, p_low)
-            lst_max_val = np.percentile(valid_obs_lst_values, p_high)
-        else:
-            lst_min_val = np.min(valid_obs_lst_values)
-            lst_max_val = np.max(valid_obs_lst_values)
-    elif valid_recon_lst_values.size > 0:
-        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
-            p_low, p_high = lst_contrast_percentiles
-            lst_min_val = np.percentile(valid_recon_lst_values, p_low)
-            lst_max_val = np.percentile(valid_recon_lst_values, p_high)
-        else:
-            lst_min_val = np.min(valid_recon_lst_values)
-            lst_max_val = np.max(valid_recon_lst_values)
+            print(f"LST visualization (Obs/Pred/Recon): Using absolute min/max scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
     
     # Ensure min_val is not greater than max_val after percentile clipping, can happen with near-constant images
     if lst_min_val >= lst_max_val:
@@ -434,15 +428,22 @@ def visualize_daily_stacks_comparison(
         ax_obs.axis('off')
         if i == 0: ax_obs.set_ylabel("Observed LST", fontsize=12)
 
-        # Row 1: Reconstructed LST
-        ax_recon = axes[1, i]
+        # Row 1: Model Predicted LST
+        ax_pred = axes[1, i]
+        im_pred = ax_pred.imshow(model_predicted_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+        ax_pred.set_title(f"Model Predicted LST (K)")
+        ax_pred.axis('off')
+        if i == 0: ax_pred.set_ylabel("Predicted LST", fontsize=12)
+
+        # Row 2: Reconstructed LST
+        ax_recon = axes[2, i]
         im_recon = ax_recon.imshow(reconstructed_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
-        ax_recon.set_title(f"Reconstructed LST (K)") # Date is already in column title from above
+        ax_recon.set_title(f"Reconstructed LST (K)") 
         ax_recon.axis('off')
         if i == 0: ax_recon.set_ylabel("Reconstructed LST", fontsize=12)
 
-        # Row 2: S2 RGB or NDVI
-        ax_s2_or_ndvi = axes[2, i]
+        # Row 3: S2 RGB or NDVI
+        ax_s2_or_ndvi = axes[3, i]
         use_ndvi_plot = getattr(app_config, 'GP_USE_NDVI_FEATURE', False)
 
         if use_ndvi_plot and ndvi_stack is not None and ndvi_stack.shape[0] > i:
@@ -461,8 +462,304 @@ def visualize_daily_stacks_comparison(
             ax_s2_or_ndvi.axis('off')
 
         if i == 0:
-            y_label_row2 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
-            ax_s2_or_ndvi.set_ylabel(y_label_row2, fontsize=12)
+            y_label_row3 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
+            ax_s2_or_ndvi.set_ylabel(y_label_row3, fontsize=12)
+
+    # Add a single colorbar for LST plots, if desired, or individual ones are fine too.
+    # For simplicity, no shared colorbar here. Each plot implicitly shows its scale via vmin/vmax.
+    # If a shared colorbar is needed:
+    # fig.colorbar(im_recon, ax=axes.ravel().tolist(), shrink=0.6, aspect=30, orientation='horizontal', label='Temperature (K)', pad=0.05)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjust layout for suptitle
+
+    viz_output_dir = os.path.join(output_base_dir, "viz")
+    os.makedirs(viz_output_dir, exist_ok=True)
+    filename = os.path.join(viz_output_dir, f"daily_comparison_{roi_name}.jpg")
+    
+    try:
+        plt.savefig(filename, dpi=150, format='jpg', quality=90)
+        print(f"Saved daily comparison visualization to {filename}")
+    except Exception as e:
+        print(f"Error saving daily comparison plot as JPG: {e}. Trying PNG...")
+        try:
+            png_filename = os.path.join(viz_output_dir, f"daily_comparison_{roi_name}.png")
+            plt.savefig(png_filename, dpi=150, format='png')
+            print(f"Saved daily comparison visualization to {png_filename}")
+        except Exception as ep:
+            print(f"Error saving daily comparison plot as PNG: {ep}")
+            
+    plt.close(fig) # Close the figure to free memory 
+
+def plot_mean_atc_loss_over_intervals(
+    mean_interval_losses: list[float], 
+    epoch_intervals_x_axis: list[int], 
+    output_dir: str, 
+    roi_name: str,
+    loss_logging_interval: int
+):
+    """
+    Plots the mean ATC training loss over specified epoch intervals and saves the plot.
+
+    Args:
+        mean_interval_losses (list[float]): List of mean loss values for each interval.
+        epoch_intervals_x_axis (list[int]): List of epoch numbers marking the end of each interval (for x-axis).
+        output_dir (str): The base output directory (e.g., config.OUTPUT_DIR).
+        roi_name (str): Name of the ROI for the plot filename.
+        loss_logging_interval (int): The interval at which losses were logged (e.g., 100 epochs).
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Matplotlib is not installed. Skipping mean ATC loss plot.")
+        return
+
+    if not mean_interval_losses or not epoch_intervals_x_axis:
+        print("Mean interval losses or epoch intervals are empty. Skipping plot.")
+        return
+    
+    if len(mean_interval_losses) != len(epoch_intervals_x_axis):
+        print(f"Warning: Mismatch in length of mean_interval_losses ({len(mean_interval_losses)}) and epoch_intervals_x_axis ({len(epoch_intervals_x_axis)}). Skipping plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Filter out NaN values for plotting, as matplotlib might not handle them well in line plots directly
+    # or may show gaps, which is acceptable.
+    valid_indices = [i for i, loss in enumerate(mean_interval_losses) if not np.isnan(loss)]
+    plottable_losses = [mean_interval_losses[i] for i in valid_indices]
+    plottable_epochs = [epoch_intervals_x_axis[i] for i in valid_indices]
+
+    if not plottable_losses:
+        print("No valid (non-NaN) mean interval losses to plot. Skipping plot.")
+        plt.close(fig)
+        return
+
+    ax.plot(plottable_epochs, plottable_losses, marker='o', linestyle='-')
+    
+    ax.set_xlabel(f"Epoch (Loss averaged over previous {loss_logging_interval} epochs)")
+    ax.set_ylabel("Mean Spatial ATC Training Loss (MSE)")
+    ax.set_title(f"Mean ATC Training Loss for {roi_name}")
+    ax.grid(True, linestyle='--', alpha=0.7)
+    
+    # Ensure x-axis ticks are sensible, especially if intervals are many
+    if len(plottable_epochs) > 10:
+        ax.set_xticks(plottable_epochs[::len(plottable_epochs)//10]) # Show about 10 ticks
+    else:
+        ax.set_xticks(plottable_epochs)
+    
+    plt.tight_layout()
+
+    plot_viz_dir = os.path.join(output_dir, "viz") # Consistent with other viz functions
+    os.makedirs(plot_viz_dir, exist_ok=True)
+    
+    filename = os.path.join(plot_viz_dir, f"mean_atc_training_loss_{roi_name}.png")
+    try:
+        plt.savefig(filename, dpi=150)
+        print(f"Saved mean ATC training loss plot to {filename}")
+    except Exception as e:
+        print(f"Error saving mean ATC loss plot: {e}")
+    
+    plt.close(fig) # Close the figure to free memory 
+
+def plot_mean_gp_loss_over_intervals(
+    mean_interval_losses: list[float], 
+    epoch_intervals_x_axis: list[int], 
+    output_dir: str, 
+    roi_name: str,
+    loss_logging_interval: int
+):
+    """
+    Plots the mean GP training loss over specified epoch intervals and saves the plot.
+
+    Args:
+        mean_interval_losses (list[float]): List of mean loss values for each interval.
+        epoch_intervals_x_axis (list[int]): List of epoch numbers marking the end of each interval (for x-axis).
+        output_dir (str): The base output directory (e.g., config.OUTPUT_DIR).
+        roi_name (str): Name of the ROI for the plot filename.
+        loss_logging_interval (int): The interval at which losses were logged (e.g., 10 epochs).
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Matplotlib is not installed. Skipping mean GP loss plot.")
+        return
+
+    if not mean_interval_losses or not epoch_intervals_x_axis:
+        print("Mean GP interval losses or epoch intervals are empty. Skipping plot.")
+        return
+    
+    if len(mean_interval_losses) != len(epoch_intervals_x_axis):
+        print(f"Warning: Mismatch in length of mean_gp_interval_losses ({len(mean_interval_losses)}) and epoch_intervals_x_axis ({len(epoch_intervals_x_axis)}). Skipping plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    valid_indices = [i for i, loss in enumerate(mean_interval_losses) if not np.isnan(loss)]
+    plottable_losses = [mean_interval_losses[i] for i in valid_indices]
+    plottable_epochs = [epoch_intervals_x_axis[i] for i in valid_indices]
+
+    if not plottable_losses:
+        print("No valid (non-NaN) mean GP interval losses to plot. Skipping plot.")
+        plt.close(fig)
+        return
+
+    ax.plot(plottable_epochs, plottable_losses, marker='o', linestyle='-', color='green')
+    
+    ax.set_xlabel(f"Epoch (Loss averaged over previous {loss_logging_interval} epochs)")
+    ax.set_ylabel("Mean GP Training Loss (Negative ELBO)")
+    ax.set_title(f"Mean GP Training Loss for {roi_name}")
+    ax.grid(True, linestyle='--', alpha=0.7)
+    
+    if len(plottable_epochs) > 10:
+        ax.set_xticks(plottable_epochs[::len(plottable_epochs)//10]) 
+    else:
+        ax.set_xticks(plottable_epochs)
+    
+    plt.tight_layout()
+
+    plot_viz_dir = os.path.join(output_dir, "viz")
+    os.makedirs(plot_viz_dir, exist_ok=True)
+    
+    filename = os.path.join(plot_viz_dir, f"mean_gp_training_loss_{roi_name}.png")
+    try:
+        plt.savefig(filename, dpi=150)
+        print(f"Saved mean GP training loss plot to {filename}")
+    except Exception as e:
+        print(f"Error saving mean GP loss plot: {e}")
+    
+    plt.close(fig)
+
+def visualize_daily_stacks_comparison(
+    lst_observed_stack: np.ndarray, 
+    model_predicted_lst_stack: np.ndarray,
+    reconstructed_lst_stack: np.ndarray, 
+    s2_reflectance_stack: np.ndarray, # (time, bands, H, W)
+    ndvi_stack: np.ndarray, # (time, H, W), can be None
+    common_dates: list, 
+    output_base_dir: str, # e.g., config.OUTPUT_DIR
+    roi_name: str,
+    app_config: 'config', # Added to access GP_USE_NDVI_FEATURE
+    s2_rgb_indices: tuple = (2, 1, 0), # (R, G, B) assuming B2,B3,B4,B8 -> B4=idx 2, B3=idx 1, B2=idx 0
+    max_days_to_plot: int = 10, # Limit the number of columns for readability
+    lst_contrast_percentiles: tuple = (2, 98) # Percentiles for LST contrast stretching (e.g., 2nd and 98th)
+):
+    """
+    Visualizes a comparison of observed LST, reconstructed LST, and either S2 RGB or NDVI images 
+    across multiple days in a grid plot.
+
+    Args:
+        lst_observed_stack (np.ndarray): (time, H, W) stack of observed LST.
+        model_predicted_lst_stack (np.ndarray): (time, H, W) stack of model predicted LST.
+        reconstructed_lst_stack (np.ndarray): (time, H, W) stack of reconstructed LST.
+        s2_reflectance_stack (np.ndarray): (time, bands, H, W) stack of S2 reflectance.
+        ndvi_stack (np.ndarray): (time, H, W) stack of NDVI data, can be None.
+        common_dates (list): List of datetime objects corresponding to the time dimension.
+        output_base_dir (str): Base output directory (e.g., config.OUTPUT_DIR).
+        roi_name (str): Name of the ROI for filenames and titles.
+        app_config (config): The application configuration object.
+        s2_rgb_indices (tuple): Indices for R, G, B bands in the s2_reflectance_stack's band dimension.
+        max_days_to_plot (int): Maximum number of days (columns) to plot.
+        lst_contrast_percentiles (tuple): Lower and upper percentiles to clip LST data for contrast enhancement.
+                                         Set to (0, 100) or None to use absolute min/max.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Matplotlib is not installed. Skipping daily stacks comparison visualization.")
+        return
+
+    num_available_days = lst_observed_stack.shape[0]
+    num_days = min(num_available_days, max_days_to_plot)
+
+    if num_days == 0:
+        print("No data available to visualize for daily stacks comparison.")
+        return
+
+    fig, axes = plt.subplots(4, num_days, figsize=(num_days * 4, 4 * 4), squeeze=False)
+    # squeeze=False ensures axes is always 2D, even if num_days=1
+    
+    plot_title_suffix = "S2 RGB"
+    if getattr(app_config, 'GP_USE_NDVI_FEATURE', False) and ndvi_stack is not None:
+        plot_title_suffix = "NDVI"
+
+    fig.suptitle(f"Daily Comparison for {roi_name} (Observed, Predicted, Reconstructed LST, {plot_title_suffix})", fontsize=16, y=0.99)
+
+    # Determine common min/max for LST plots for consistent color scaling across days
+    valid_obs_lst_values = lst_observed_stack[~np.isnan(lst_observed_stack)]
+    valid_pred_lst_values = model_predicted_lst_stack[~np.isnan(model_predicted_lst_stack)]
+    valid_recon_lst_values = reconstructed_lst_stack[~np.isnan(reconstructed_lst_stack)]
+    
+    lst_min_val, lst_max_val = (270, 320) # Default fallback
+
+    # Combine all valid LST values for consistent scaling
+    all_valid_lst_for_scaling = []
+    if valid_obs_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_obs_lst_values)
+    if valid_pred_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_pred_lst_values)
+    if valid_recon_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_recon_lst_values)
+
+    if all_valid_lst_for_scaling:
+        combined_lst_values = np.concatenate(all_valid_lst_for_scaling)
+        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
+            p_low, p_high = lst_contrast_percentiles
+            lst_min_val = np.percentile(combined_lst_values, p_low)
+            lst_max_val = np.percentile(combined_lst_values, p_high)
+            print(f"LST visualization (Obs/Pred/Recon): Using percentile ({p_low}%, {p_high}%) scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
+        else:
+            lst_min_val = np.min(combined_lst_values)
+            lst_max_val = np.max(combined_lst_values)
+            print(f"LST visualization (Obs/Pred/Recon): Using absolute min/max scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
+    
+    # Ensure min_val is not greater than max_val after percentile clipping, can happen with near-constant images
+    if lst_min_val >= lst_max_val:
+        lst_min_val = lst_max_val - 1 # Arbitrary small difference to make imshow happy
+        print(f"Warning: LST min_val >= max_val after percentile clip. Adjusted to min={lst_min_val:.2f}, max={lst_max_val:.2f}")
+
+    for i in range(num_days):
+        date_str = common_dates[i].strftime('%Y-%m-%d')
+        
+        # Row 0: Observed LST
+        ax_obs = axes[0, i]
+        im_obs = ax_obs.imshow(lst_observed_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+        ax_obs.set_title(f"{date_str}\nObserved LST (K)")
+        ax_obs.axis('off')
+        if i == 0: ax_obs.set_ylabel("Observed LST", fontsize=12)
+
+        # Row 1: Model Predicted LST
+        ax_pred = axes[1, i]
+        im_pred = ax_pred.imshow(model_predicted_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+        ax_pred.set_title(f"Model Predicted LST (K)")
+        ax_pred.axis('off')
+        if i == 0: ax_pred.set_ylabel("Predicted LST", fontsize=12)
+
+        # Row 2: Reconstructed LST
+        ax_recon = axes[2, i]
+        im_recon = ax_recon.imshow(reconstructed_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+        ax_recon.set_title(f"Reconstructed LST (K)") 
+        ax_recon.axis('off')
+        if i == 0: ax_recon.set_ylabel("Reconstructed LST", fontsize=12)
+
+        # Row 3: S2 RGB or NDVI
+        ax_s2_or_ndvi = axes[3, i]
+        use_ndvi_plot = getattr(app_config, 'GP_USE_NDVI_FEATURE', False)
+
+        if use_ndvi_plot and ndvi_stack is not None and ndvi_stack.shape[0] > i:
+            im_ndvi = ax_s2_or_ndvi.imshow(ndvi_stack[i], cmap='RdYlGn', vmin=-1, vmax=1)
+            ax_s2_or_ndvi.set_title(f"NDVI")
+            ax_s2_or_ndvi.axis('off')
+            # Optional: Add a colorbar for NDVI if desired, though often the range is standard
+            # if i == num_days - 1: # Add colorbar to the last plot
+            #     fig.colorbar(im_ndvi, ax=ax_s2_or_ndvi, orientation='vertical', label='NDVI', fraction=0.046, pad=0.04)
+        elif s2_reflectance_stack is not None and s2_reflectance_stack.shape[0] > i:
+            plot_s2_rgb(s2_reflectance_stack[i], ax_s2_or_ndvi, title=f"S2 RGB", band_indices_rgb=s2_rgb_indices)
+            # plot_s2_rgb already calls axis('off')
+        else:
+            ax_s2_or_ndvi.text(0.5, 0.5, 'Image Data Not Available', horizontalalignment='center', verticalalignment='center')
+            ax_s2_or_ndvi.set_title(f"{plot_title_suffix}")
+            ax_s2_or_ndvi.axis('off')
+
+        if i == 0:
+            y_label_row3 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
+            ax_s2_or_ndvi.set_ylabel(y_label_row3, fontsize=12)
 
     # Add a single colorbar for LST plots, if desired, or individual ones are fine too.
     # For simplicity, no shared colorbar here. Each plot implicitly shows its scale via vmin/vmax.

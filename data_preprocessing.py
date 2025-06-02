@@ -769,6 +769,34 @@ def preprocess_all_data(app_config) -> dict:
         # Ensure ndvi_stack_final is explicitly None or an empty/NaN array if not used, for consistency in the output dict.
         # If GP_USE_NDVI_FEATURE is false, it will remain None as initialized.
 
+    # 8. Spatial Sampling for Training (NEW STEP)
+    training_pixel_mask = np.ones((target_height, target_width), dtype=bool) # Default to all True
+    if hasattr(app_config, 'SPATIAL_TRAINING_SAMPLE_PERCENTAGE') and app_config.SPATIAL_TRAINING_SAMPLE_PERCENTAGE < 1.0:
+        sample_percentage = app_config.SPATIAL_TRAINING_SAMPLE_PERCENTAGE
+        min_pixels = getattr(app_config, 'MIN_PIXELS_FOR_SPATIAL_SAMPLING', 100)
+        
+        total_pixels_in_grid = target_height * target_width
+        num_pixels_to_sample_float = total_pixels_in_grid * sample_percentage
+        num_pixels_to_sample = max(min_pixels, int(num_pixels_to_sample_float))
+        num_pixels_to_sample = min(num_pixels_to_sample, total_pixels_in_grid) # Cannot sample more than available
+
+        print(f"Spatially sampling {num_pixels_to_sample} pixels ({sample_percentage*100}%, min set to {min_pixels}) for training.")
+        
+        # Create a flat list of all possible (row, col) indices
+        all_pixel_indices = np.array([(r, c) for r in range(target_height) for c in range(target_width)])
+        
+        # Randomly choose indices
+        np.random.seed(app_config.RANDOM_SEED if hasattr(app_config, 'RANDOM_SEED') else 42)
+        selected_indices_flat = np.random.choice(len(all_pixel_indices), size=num_pixels_to_sample, replace=False)
+        selected_pixel_coords = all_pixel_indices[selected_indices_flat]
+        
+        training_pixel_mask = np.zeros((target_height, target_width), dtype=bool)
+        for r_idx, c_idx in selected_pixel_coords:
+            training_pixel_mask[r_idx, c_idx] = True
+        print(f"Actual number of pixels selected for training mask: {np.sum(training_pixel_mask)}")
+    else:
+        print("Using all spatial pixels for training (SPATIAL_TRAINING_SAMPLE_PERCENTAGE is 1.0 or not defined).")
+
     # All stacks (LST, ERA5, S2, NDVI if used) are now aligned to primary_common_dates.
     # No further date-based filtering of stacks is needed here.
 
@@ -786,7 +814,8 @@ def preprocess_all_data(app_config) -> dict:
         "lon_scaler": lon_scaler,
         "lat_scaler": lat_scaler,
         "reference_grid_path": actual_reference_grid_path,
-        "roi_name": app_config.ROI_NAME
+        "roi_name": app_config.ROI_NAME,
+        "training_pixel_mask": training_pixel_mask # Add the mask to output
     }
     if ndvi_stack_final is not None:
         output_data["ndvi_stack"] = np.array(ndvi_stack_final, dtype=np.float32)

@@ -45,14 +45,55 @@ def main():
         return # Stop pipeline if preprocessing fails
     print("Data preprocessing completed.")
 
+    # --- START DIAGNOSTIC BLOCK FOR PREPROCESSED DATA ---
+    if 'era5_stack' in preprocessed_data:
+        era5_nan_count = np.isnan(preprocessed_data['era5_stack']).sum()
+        era5_total_count = preprocessed_data['era5_stack'].size
+        era5_nan_percentage = (era5_nan_count / era5_total_count) * 100 if era5_total_count > 0 else 0
+        print(f"  DIAGNOSTIC (PREPROCESSING): ERA5 stack has {era5_nan_count} NaNs out of {era5_total_count} values ({era5_nan_percentage:.2f}%).")
+        if era5_nan_percentage > 0:
+            print("    INFO: These NaNs in ERA5 will likely propagate to ATC predictions if the 'b' coefficient is non-zero.")
+    if 's2_reflectance_stack' in preprocessed_data:
+        s2_nan_count = np.isnan(preprocessed_data['s2_reflectance_stack']).sum()
+        s2_total_count = preprocessed_data['s2_reflectance_stack'].size
+        s2_nan_percentage = (s2_nan_count / s2_total_count) * 100 if s2_total_count > 0 else 0
+        print(f"  DIAGNOSTIC (PREPROCESSING): S2 reflectance stack has {s2_nan_count} NaNs out of {s2_total_count} values ({s2_nan_percentage:.2f}%).")
+    # --- END DIAGNOSTIC BLOCK FOR PREPROCESSED DATA ---
+
     # 2. Train ATC Model and Get Predictions/Variance
     print("\nStep 2: ATC Model Training and Prediction")
     try:
         # Phase 2.1: Train ATC models and save snapshots
-        print("  Phase 2.1: Training ATC models and collecting snapshots...")
-        all_pixel_snapshots = atc_model.train_and_collect_all_atc_snapshots(
+        print("  Phase 2.1: Training ATC models and collecting snapshots/losses...")
+        # Now expects two return values: snapshots and interval loss maps
+        all_pixel_snapshots, interval_loss_maps_array = atc_model.train_and_collect_all_atc_snapshots(
             preprocessed_data, config
         )
+
+        # --- Plot Mean ATC Training Loss ---
+        if interval_loss_maps_array is not None and interval_loss_maps_array.size > 0:
+            mean_losses_over_intervals = np.nanmean(interval_loss_maps_array, axis=(1, 2)) # Mean over H, W for each interval
+            num_intervals = interval_loss_maps_array.shape[0]
+            loss_logging_interval = getattr(config, 'ATC_LOSS_LOGGING_INTERVAL', 100)
+            epoch_ticks = [(i + 1) * loss_logging_interval for i in range(num_intervals)]
+            
+            # Ensure epoch_ticks doesn't exceed ATC_EPOCHS if it was not a perfect multiple
+            if epoch_ticks and epoch_ticks[-1] > config.ATC_EPOCHS:
+                # Adjust the last tick or handle how epochs are displayed if desired.
+                # For simplicity, we can cap it or let it be if it represents the *end* of an interval beyond total epochs.
+                # The plot function can clarify this in its x-label.
+                pass 
+
+            utils.plot_mean_atc_loss_over_intervals(
+                mean_interval_losses=list(mean_losses_over_intervals),
+                epoch_intervals_x_axis=epoch_ticks,
+                output_dir=config.OUTPUT_DIR, # Main output dir, plot_mean_atc_loss will put it in a 'viz' subdir
+                roi_name=preprocessed_data.get('roi_name', 'UnknownROI'),
+                loss_logging_interval=loss_logging_interval
+            )
+        else:
+            print("  Skipping ATC mean loss plot as interval_loss_maps_array is None or empty.")
+        # --- End Plot Mean ATC Training Loss ---
 
         # Define path for saving snapshots
         # Ensure MODEL_WEIGHTS_PATH is defined in your config and the directory exists
@@ -117,12 +158,47 @@ def main():
     # --- END DIAGNOSTIC BLOCK FOR ATC ---
 
     # 3. Train GP Model for Residuals and Get Predictions/Variance
-    print("\nStep 3: GP Model Training and Prediction for Residuals")
+    print("\nStep 3: GP Model Training for Residuals and Saving Model")
     try:
-        gp_mean_residuals_map, gp_variance_residuals_map = gp_model.train_and_predict_all_gp_residuals(
+        # Phase 3.1: Train GP model and save it (also saves interval losses internally)
+        gp_model.train_and_save_gp_model(
             preprocessed_data, atc_mean_predictions, config
         )
-        # Save GP outputs (optional)
+        print("GP model training and saving completed.")
+
+        # --- Plot Mean GP Training Loss ---
+        gp_model_filepath = os.path.join(config.MODEL_WEIGHTS_PATH, config.GP_MODEL_WEIGHT_FILENAME)
+        gp_interval_losses = gp_model.load_gp_interval_losses(gp_model_filepath)
+        
+        if gp_interval_losses:
+            num_gp_intervals = len(gp_interval_losses)
+            gp_loss_logging_interval = getattr(config, 'GP_LOSS_LOGGING_INTERVAL', 10)
+            # Calculate epoch ticks based on total epochs for GP = GP_EPOCHS_INITIAL + GP_EPOCHS_FINAL
+            total_gp_epochs = config.GP_EPOCHS_INITIAL + config.GP_EPOCHS_FINAL
+            gp_epoch_ticks = [(i + 1) * gp_loss_logging_interval for i in range(num_gp_intervals)]
+            # Cap ticks at total_gp_epochs if needed, though interval logic should align
+            if gp_epoch_ticks and gp_epoch_ticks[-1] > total_gp_epochs and num_gp_intervals * gp_loss_logging_interval > total_gp_epochs:
+                 # This can happen if the last interval is partial. The plot x-label clarifies.
+                 pass 
+
+            utils.plot_mean_gp_loss_over_intervals(
+                mean_interval_losses=gp_interval_losses, # Already a list of means
+                epoch_intervals_x_axis=gp_epoch_ticks,
+                output_dir=config.OUTPUT_DIR,
+                roi_name=preprocessed_data.get('roi_name', 'UnknownROI'),
+                loss_logging_interval=gp_loss_logging_interval
+            )
+        else:
+            print("  Skipping GP mean loss plot as interval losses were not found or loaded.")
+        # --- End Plot Mean GP Training Loss ---
+
+        # Phase 3.2: Load GP model and predict residuals
+        print("\nStep 3.2: Loading GP Model and Predicting Residuals")
+        gp_mean_residuals_map, gp_variance_residuals_map = gp_model.load_and_predict_gp_residuals(
+            preprocessed_data, atc_mean_predictions, config
+        )
+
+        # Optional: Save GP outputs (for debugging or intermediate results)
         # utils.save_array_as_geotiff(gp_mean_residuals_map, preprocessed_data['reference_grid_path'], 
         #                               os.path.join(config.OUTPUT_DIR, 'gp_mean_residuals_map.tif'))
         # utils.save_array_as_geotiff(gp_variance_residuals_map, preprocessed_data['reference_grid_path'], 
@@ -136,6 +212,8 @@ def main():
 
     # 4. Combine Predictions and Quantify Uncertainty
     print("\nStep 4: Combining Predictions and Quantifying Uncertainty")
+    # This step produces the 'reconstructed_lst' that is used for saving and visualization,
+    # which correctly incorporates observed data for clear pixels.
     try:
         reconstructed_lst, total_variance, ci_lower, ci_upper = reconstruction.combine_predictions(
             atc_predictions=atc_mean_predictions,
@@ -208,11 +286,32 @@ def main():
         traceback.print_exc()
         # Continue to evaluation even if saving fails for some reason
 
+    # Create the 'model_predictions_for_eval' for fair evaluation
+    # This represents the model's raw output before merging with observed data.
+    print("\nPreparing model's raw predictions for evaluation purposes...")
+    # Start with ATC predictions
+    model_predictions_for_eval = np.copy(atc_mean_predictions)
+    
+    # Add GP residuals where they are valid
+    # If gp_mean_residuals_map is None or all NaN (e.g. GP failed/skipped), this won't add anything or add NaNs
+    if gp_mean_residuals_map is not None:
+        # Ensure gp_mean_residuals_map is not all NaNs before attempting to add
+        if not np.all(np.isnan(gp_mean_residuals_map)):
+            # Where gp_mean_residuals_map is NaN, adding it will result in NaN, which is fine.
+            # Where atc_mean_predictions is NaN, result will be NaN.
+            model_predictions_for_eval = atc_mean_predictions + gp_mean_residuals_map
+        else:
+            print("  GP mean residuals map is all NaN; using only ATC predictions for model evaluation output.")
+            # model_predictions_for_eval already holds atc_mean_predictions
+    else:
+        print("  GP mean residuals map is None; using only ATC predictions for model evaluation output.")
+        # model_predictions_for_eval already holds atc_mean_predictions
+
     # 6. Evaluate Model Performance
     print("\nStep 6: Model Evaluation")
     try:
         all_eval_metrics = evaluation.run_all_evaluations(
-            reconstructed_lst=reconstructed_lst,
+            model_predicted_lst=model_predictions_for_eval, # Use the model's raw predictions
             observed_lst_clear=preprocessed_data['lst_stack'], # Original LST with NaNs for clouds
             app_config=config
         )
@@ -229,7 +328,7 @@ def main():
        preprocessed_data.get('lst_stack') is not None and \
        preprocessed_data.get('s2_reflectance_stack') is not None and \
        preprocessed_data.get('common_dates'):
-        print("\nVisualizing daily comparison stacks (Observed LST vs Reconstructed LST)...")
+        print("\nVisualizing daily comparison stacks (Observed LST vs Predicted LST vs Reconstructed LST)...")
         try:
             # Assuming S2 bands are [B2, B3, B4, B8], so RGB indices are (B4=2, B3=1, B2=0)
             s2_rgb_indices_param = getattr(config, 'S2_RGB_INDICES', (2, 1, 0)) 
@@ -237,6 +336,7 @@ def main():
 
             utils.visualize_daily_stacks_comparison(
                 lst_observed_stack=preprocessed_data['lst_stack'],
+                model_predicted_lst_stack=model_predictions_for_eval, # ADDED: Pass model's direct predictions
                 reconstructed_lst_stack=reconstructed_lst,
                 s2_reflectance_stack=preprocessed_data['s2_reflectance_stack'],
                 ndvi_stack=preprocessed_data.get('ndvi_stack'), # Pass NDVI stack, could be None

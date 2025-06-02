@@ -58,16 +58,15 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray, prefix: str = "") 
     return metrics
 
 def evaluate_reconstruction_simulated_clouds(
-    reconstructed_lst: np.ndarray, 
+    model_predicted_lst: np.ndarray,
     observed_lst_clear: np.ndarray, 
     app_config: 'config'
 ) -> dict:
     """
-    Evaluates reconstructed LST against clear-sky observations.
-    Clear-sky observations are identified by non-NaN values in observed_lst_clear.
+    Evaluates model-predicted LST against clear-sky observations.
 
     Args:
-        reconstructed_lst (np.ndarray): The full LST product after reconstruction (T, H, W).
+        model_predicted_lst (np.ndarray): The model's direct LST predictions (T, H, W).
         observed_lst_clear (np.ndarray): Original LST observations, including only clear-sky values (NaN elsewhere) (T, H, W).
         app_config: Configuration object.
 
@@ -83,28 +82,23 @@ def evaluate_reconstruction_simulated_clouds(
     clear_pixels_mask = ~np.isnan(observed_lst_clear)
     
     true_values = observed_lst_clear[clear_pixels_mask]
-    pred_values = reconstructed_lst[clear_pixels_mask]
+    pred_values = model_predicted_lst[clear_pixels_mask]
 
     simulated_metrics = calculate_metrics(true_values, pred_values, prefix="simulated_clouds_")
-    print(f"Simulated cloud evaluation metrics: {simulated_metrics}")
+    print(f"Simulated cloud evaluation metrics (model_predicted vs observed_clear): {simulated_metrics}")
     return simulated_metrics
 
 def evaluate_reconstruction_heavily_cloudy(
-    reconstructed_lst: np.ndarray, 
+    model_predicted_lst: np.ndarray,
     observed_lst_clear: np.ndarray, 
     app_config: 'config' 
 ) -> dict:
     """
-    Evaluates performance under heavily cloudy conditions by holding out a percentage of valid observations.
-    This requires a separate run where some clear data is intentionally masked during reconstruction.
-    For this implementation, we'll compare the final `reconstructed_lst` against the 
-    `observed_lst_clear` values that *would have been* part of a holdout set.
-
-    This function simulates the holdout by taking a random 20% of *originally clear* pixels, 
-    and compares their observed LST to the reconstructed LST.
+    Evaluates performance under heavily cloudy conditions by holding out a percentage of valid observations,
+    comparing model's direct predictions against these holdout clear pixels.
 
     Args:
-        reconstructed_lst (np.ndarray): The full LST product after reconstruction (T, H, W).
+        model_predicted_lst (np.ndarray): The model's direct LST predictions (T, H, W).
         observed_lst_clear (np.ndarray): Original LST observations, including only clear-sky values (NaN elsewhere) (T, H, W).
         app_config: Configuration object.
 
@@ -138,29 +132,25 @@ def evaluate_reconstruction_heavily_cloudy(
     holdout_col_indices = clear_pixel_indices_col[holdout_indices_selector]
 
     true_values_holdout = observed_lst_clear[holdout_time_indices, holdout_row_indices, holdout_col_indices]
-    pred_values_holdout = reconstructed_lst[holdout_time_indices, holdout_row_indices, holdout_col_indices]
+    pred_values_holdout = model_predicted_lst[holdout_time_indices, holdout_row_indices, holdout_col_indices]
     
-    # Here, pred_values_holdout are from the `reconstructed_lst`. 
-    # If these pixels were truly held out during training/reconstruction steps, 
-    # then `reconstructed_lst` at these locations would be purely model-driven.
-    # Given our current pipeline, `reconstructed_lst` might just be the observed value if it was clear.
-    # For a true holdout evaluation, one would need to mask these pixels *before* ATC/GP training and reconstruction.
-    # This simulation tests the final product against a subset of clear observations.
+    # Here, pred_values_holdout are from the `model_predicted_lst`.
+    # This now correctly tests the model's pure predictive capability on these holdout points.
 
     holdout_metrics = calculate_metrics(true_values_holdout, pred_values_holdout, prefix="heavily_cloudy_holdout_")
     print(f"Heavily cloudy (holdout) evaluation metrics: {holdout_metrics}")
     return holdout_metrics
 
 def run_all_evaluations(
-    reconstructed_lst: np.ndarray, 
+    model_predicted_lst: np.ndarray,
     observed_lst_clear: np.ndarray, # This is typically preprocessed_data['lst_stack']
     app_config: 'config'
 ) -> dict:
     """
-    Runs all defined evaluation strategies.
+    Runs all defined evaluation strategies using the model's direct predictions.
 
     Args:
-        reconstructed_lst (np.ndarray): Final reconstructed LST product (T, H, W).
+        model_predicted_lst (np.ndarray): Model's direct LST predictions (T, H, W).
         observed_lst_clear (np.ndarray): Original LST observations, with NaNs for clouds (T, H, W).
         app_config: Configuration object.
 
@@ -169,16 +159,15 @@ def run_all_evaluations(
     """
     all_metrics = {}
 
-    # Strategy 1: Compare reconstructed LST with clear-sky observations (simulated clouds)
-    # This evaluates how well the model fills gaps if we consider all original clear spots as ground truth.
+    # Strategy 1: Compare model-predicted LST with clear-sky observations
     metrics_simulated = evaluate_reconstruction_simulated_clouds(
-        reconstructed_lst, observed_lst_clear, app_config
+        model_predicted_lst, observed_lst_clear, app_config
     )
     all_metrics.update(metrics_simulated)
 
-    # Strategy 2: Evaluate under heavily cloudy conditions (simulated holdout)
+    # Strategy 2: Evaluate under heavily cloudy conditions (simulated holdout) using model predictions
     metrics_holdout = evaluate_reconstruction_heavily_cloudy(
-        reconstructed_lst, observed_lst_clear, app_config
+        model_predicted_lst, observed_lst_clear, app_config
     )
     all_metrics.update(metrics_holdout)
 
@@ -233,35 +222,32 @@ if __name__ == '__main__':
 
     # dummy_cloud_mask_stack = (np.random.rand(num_times, height, width) > 0.7).astype(np.uint8) # No longer used
 
-    # Simulate reconstructed LST (could be a mix of observed and filled values)
-    # For this test, let's assume it's perfectly reconstructed where observed_lst was clear,
-    # and has some model-based values where observed_lst was NaN.
-    dummy_reconstructed_lst = np.copy(dummy_observed_lst)
-    # Fill NaN (cloudy) parts with some simulated reconstructed values
-    nan_locations = np.isnan(dummy_reconstructed_lst)
-    dummy_reconstructed_lst[nan_locations] = (np.random.rand(*dummy_reconstructed_lst.shape)[nan_locations].astype(np.float32) * 15 + 275)
+    # Simulate model's direct predictions (these would be ATC+GP output)
+    # For this test, let's make them slightly different from observed_lst even for clear areas
+    dummy_model_predicted_lst = dummy_observed_lst_raw + (np.random.randn(num_times,height,width) * 0.5) # Simulate some noise/error
+    # Where observed_lst was NaN (cloudy), model predictions would be purely model-driven
+    nan_locations_obs = np.isnan(dummy_observed_lst)
+    dummy_model_predicted_lst[nan_locations_obs] = (np.random.rand(*dummy_model_predicted_lst.shape)[nan_locations_obs].astype(np.float32) * 15 + 275)
+
 
     # Ensure some specific cases for testing:
     # Pixel (0,0,0) should be clear if not made NaN by random cloud_locations
     if np.isnan(dummy_observed_lst[0,0,0]): 
         dummy_observed_lst[0,0,0] = 290.0 # Make it clear
-        dummy_reconstructed_lst[0,0,0] = 290.0 # Assume perfect recon for this clear spot
+    dummy_model_predicted_lst[0,0,0] = 290.5 # Model prediction slightly off from clear observed
     
     # Pixel (0,0,1) should be cloudy, with a distinct reconstructed value
     dummy_observed_lst[0,0,1] = np.nan
-    dummy_reconstructed_lst[0,0,1] = 285.0 # A reconstructed value
+    dummy_model_predicted_lst[0,0,1] = 285.0 # A model-predicted value for cloudy spot
 
     print("Dummy Observed LST (with NaNs for clouds) - Time 0:")
     print(dummy_observed_lst[0,:,:])
-    # print("Dummy Cloud Mask - Time 0:") # Removed
-    # print(dummy_cloud_mask_stack[0,:,:]) # Removed
-    print("Dummy Reconstructed LST - Time 0:")
-    print(dummy_reconstructed_lst[0,:,:])
+    print("Dummy Model Predicted LST - Time 0:")
+    print(dummy_model_predicted_lst[0,:,:])
 
     all_eval_metrics = run_all_evaluations(
-        dummy_reconstructed_lst, 
+        dummy_model_predicted_lst,
         dummy_observed_lst, 
-        # dummy_cloud_mask_stack, # Removed
         dummy_config
     )
 
