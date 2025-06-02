@@ -138,7 +138,7 @@ def process_s2_images(s2_folder_path):
                             data = data.astype(output_dtype)
                         
                         # Replace -9999 with np.nan
-                        data[data == -9999] = np.nan
+                        data[data <= -4000] = np.nan
                         # Replace negative infinity with np.nan
                         data[data == -np.inf] = np.nan # Or use np.isneginf(data) for safety
                         

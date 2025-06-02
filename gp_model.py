@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd # For feature naming consistency if needed
 from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
+import warnings # Import the standard warnings module
 
 import config # Assuming your config.py is accessible
 
@@ -204,6 +205,7 @@ def prepare_gp_training_data(preprocessed_data: dict, atc_predictions: np.ndarra
     s2_stack_time_bands_hw = preprocessed_data['s2_reflectance_stack'] # (time, num_bands, height, width)
     lon_coords = preprocessed_data['lon_coords'] # (height, width), normalized
     lat_coords = preprocessed_data['lat_coords'] # (height, width), normalized
+    ndvi_stack = preprocessed_data.get('ndvi_stack') # (time, height, width), may be None
 
     num_times, height, width = lst_stack.shape
     if s2_stack_time_bands_hw.shape[0] != num_times or \
@@ -211,9 +213,33 @@ def prepare_gp_training_data(preprocessed_data: dict, atc_predictions: np.ndarra
        s2_stack_time_bands_hw.shape[3] != width:
         raise ValueError("Shape mismatch between LST stack and S2 stack (time, H, W dimensions)")
     num_s2_bands = s2_stack_time_bands_hw.shape[1]
-    # Assuming config.GP_RESIDUAL_FEATURES has s2 bands first, then lon, then lat.
-    # Dynamic feature count based on S2 bands + 2 coordinates.
-    num_gp_features = num_s2_bands + 2 
+
+    # Determine GP features based on config
+    use_ndvi_feature = getattr(app_config, 'GP_USE_NDVI_FEATURE', False)
+    use_temporal_mean_s2 = getattr(app_config, 'GP_USE_TEMPORAL_MEAN_S2_FEATURES', False)
+
+    current_s2_features_for_gp = None
+    num_gp_features = 0
+
+    if use_ndvi_feature and ndvi_stack is not None:
+        print("Using NDVI as a feature for GP model.")
+        num_gp_features = 1 + 2 # NDVI + lon + lat
+        # The ndvi_stack itself will be indexed per t,r,c later
+    elif use_temporal_mean_s2:
+        print("Using temporal mean of S2 bands for GP features.")
+        # Calculate temporal mean of S2 bands. Result shape: (num_bands, height, width)
+        # RuntimeWarning: Mean of empty slice, can be ignored if NaNs are handled as expected.
+        with warnings.catch_warnings(): # Use standard warnings module
+            warnings.filterwarnings('ignore', r'Mean of empty slice') # Use standard warnings module
+            current_s2_features_for_gp = np.nanmean(s2_stack_time_bands_hw, axis=0) # Shape: (num_bands, height, width)
+        num_gp_features = num_s2_bands + 2
+    else:
+        print("Using instantaneous S2 bands for GP features.")
+        current_s2_features_for_gp = s2_stack_time_bands_hw # Shape: (time, num_bands, height, width)
+        num_gp_features = num_s2_bands + 2
+
+    if num_gp_features == 0:
+        raise ValueError("Could not determine GP features based on configuration. num_gp_features is 0.")
 
     residuals = lst_stack - atc_predictions 
     residuals[np.isnan(lst_stack)] = np.nan 
@@ -226,25 +252,41 @@ def prepare_gp_training_data(preprocessed_data: dict, atc_predictions: np.ndarra
     for t in tqdm(range(num_times), desc="Processing Time Steps for GP Data"):
         for r in range(height):
             for c in range(width):
-                s2_features_trc = s2_stack_time_bands_hw[t, :, r, c] # Keep as numpy array for isnan check
-                coords_rc = [lon_coords[r, c], lat_coords[r, c]]
-                # Convert s2_features_trc to list before concatenation for features_all_pixel_time_list
-                current_features_trc_list = s2_features_trc.tolist() + coords_rc
-                features_all_pixel_time_list.append(current_features_trc_list)
+                pixel_features_list = []
+                valid_pixel_features = True
 
-                # Check for NaNs in both residuals and S2 features for training data
-                if not np.isnan(residuals[t, r, c]) and not np.isnan(s2_features_trc).any():
-                    # current_features_trc_list is already prepared
-                    train_x_list.append(current_features_trc_list)
+                if use_ndvi_feature and ndvi_stack is not None:
+                    ndvi_val = ndvi_stack[t, r, c]
+                    if np.isnan(ndvi_val):
+                        valid_pixel_features = False
+                    pixel_features_list.append(ndvi_val)
+                elif use_temporal_mean_s2:
+                    # current_s2_features_for_gp has shape (num_bands, height, width)
+                    s2_pixel_vals = current_s2_features_for_gp[:, r, c]
+                    if np.isnan(s2_pixel_vals).any():
+                        valid_pixel_features = False
+                    pixel_features_list.extend(s2_pixel_vals.tolist())
+                else: # Instantaneous S2
+                    # current_s2_features_for_gp has shape (time, num_bands, height, width)
+                    s2_pixel_vals = current_s2_features_for_gp[t, :, r, c]
+                    if np.isnan(s2_pixel_vals).any():
+                        valid_pixel_features = False
+                    pixel_features_list.extend(s2_pixel_vals.tolist())
+                
+                coords_rc = [lon_coords[r, c], lat_coords[r, c]]
+                full_pixel_features = pixel_features_list + coords_rc
+                features_all_pixel_time_list.append(full_pixel_features)
+
+                # Check for NaNs in residuals AND ensure pixel_features were valid for training data
+                if not np.isnan(residuals[t, r, c]) and valid_pixel_features:
+                    train_x_list.append(full_pixel_features)
                     train_y_list.append(residuals[t, r, c])
     
     if not train_x_list:
         # Handle case with no clear sky data for training GP - this would be problematic
-        print("Warning: No clear-sky data points found to train the GP model. Predictions will be based on untrained GP (prior only).")
-        # Create dummy small tensors to avoid errors, though model won't learn
-        # The number of features should match GP_RESIDUAL_FEATURES in config (e.g. 4 S2 bands + 2 coords = 6)
-        num_features_from_config = len(app_config.GP_RESIDUAL_FEATURES)
-        train_x = torch.empty(0, num_features_from_config, dtype=torch.float32)
+        print("Warning: No clear-sky data points (with valid features) found to train the GP model. Predictions will be based on untrained GP (prior only).")
+        # Use the dynamically determined num_gp_features
+        train_x = torch.empty(0, num_gp_features, dtype=torch.float32)
         train_y = torch.empty(0, dtype=torch.float32)
     else:
         train_x = torch.tensor(train_x_list, dtype=torch.float32)
@@ -324,10 +366,34 @@ if __name__ == '__main__':
             self.GP_LEARNING_RATE_INITIAL = 0.01
             self.GP_LEARNING_RATE_FINAL = 0.001
             # Define GP_RESIDUAL_FEATURES to match dummy data: 4 S2 bands + 2 coords
-            self.GP_RESIDUAL_FEATURES = ['s2_b1', 's2_b2', 's2_b3', 's2_b4', 'lon', 'lat']
+            # This GP_RESIDUAL_FEATURES in config might become misleading as features are now dynamic.
+            # The actual number of features is determined in prepare_gp_training_data.
+            self.GP_RESIDUAL_FEATURES_CONFIG_IGNORED = ['s2_b1', 's2_b2', 's2_b3', 's2_b4', 'lon', 'lat']
+            self.GP_USE_TEMPORAL_MEAN_S2_FEATURES = False # Test default behavior first
+            self.GP_USE_NDVI_FEATURE = False # Test default behavior
+            self.S2_RED_INDEX = 2 # Example for dummy S2 [B,G,R,N]
+            self.S2_NIR_INDEX = 3 # Example for dummy S2 [B,G,R,N]
 
-    test_app_config = DummyConfig()
+    test_app_config_default = DummyConfig()
     
+    # Test with GP_USE_TEMPORAL_MEAN_S2_FEATURES = True
+    class DummyConfigTemporalMeanS2(DummyConfig):
+        def __init__(self):
+            super().__init__()
+            self.GP_USE_TEMPORAL_MEAN_S2_FEATURES = True
+            self.GP_USE_NDVI_FEATURE = False
+            
+    test_app_config_temporal_mean_s2 = DummyConfigTemporalMeanS2()
+
+    # Test with GP_USE_NDVI_FEATURE = True
+    class DummyConfigNDVI(DummyConfig):
+        def __init__(self):
+            super().__init__()
+            self.GP_USE_TEMPORAL_MEAN_S2_FEATURES = False # Ensure this is False if NDVI is primary
+            self.GP_USE_NDVI_FEATURE = True
+
+    test_app_config_ndvi = DummyConfigNDVI()
+
     # Dummy preprocessed_data
     num_times_test, height_test, width_test = 3, 5, 5
     num_s2_bands_test = 4 # Matching the change
@@ -341,6 +407,11 @@ if __name__ == '__main__':
     dummy_s2_stack = np.random.rand(num_times_test, num_s2_bands_test, height_test, width_test).astype(np.float32)
     dummy_s2_stack[0, :, 0, 0] = np.nan # S2 can also have NaNs if source was NaN
 
+    # Dummy NDVI stack (time, height, width) - will be populated by data_preprocessing if active
+    # For direct testing of gp_model.py, we can simulate its presence if GP_USE_NDVI_FEATURE is true in test config
+    dummy_ndvi_stack = np.random.rand(num_times_test, height_test, width_test).astype(np.float32)
+    dummy_ndvi_stack[0, 0, 1] = np.nan # Simulate some NaN in NDVI
+
     # Coordinates
     dummy_lon_coords = np.linspace(0, 1, width_test).reshape(1, -1).repeat(height_test, axis=0)
     dummy_lat_coords = np.linspace(0, 1, height_test).reshape(-1, 1).repeat(width_test, axis=1)
@@ -348,70 +419,90 @@ if __name__ == '__main__':
     # Dummy ATC predictions (all clear for simplicity here)
     dummy_atc_predictions = np.random.rand(num_times_test, height_test, width_test).astype(np.float32) * 10 + 288
 
-    preprocessed_data_test = {
+    preprocessed_data_test_base = {
         "lst_stack": dummy_lst_stack,
-        "s2_reflectance_stack": dummy_s2_stack, # Now (time, bands, H, W)
+        "s2_reflectance_stack": dummy_s2_stack, 
         "lon_coords": dummy_lon_coords,
         "lat_coords": dummy_lat_coords,
         # "cloud_mask_stack": dummy_cloud_mask # No longer used
     }
 
     print("--- Testing GP Model module --- ")
-    try:
-        # Test data preparation
-        train_x_out, train_y_out, features_pred_flat_out, original_dims_out = prepare_gp_training_data(
-            preprocessed_data_test, dummy_atc_predictions, test_app_config
-        )
-        print(f"prepare_gp_training_data output shapes:")
-        print(f"  train_x: {train_x_out.shape}")
-        print(f"  train_y: {train_y_out.shape}")
-        print(f"  features_pred_flat: {features_pred_flat_out.shape}")
-        print(f"  original_dims: {original_dims_out}")
+    
+    # Test scenarios
+    test_configs_to_run = {
+        "Instantaneous_S2": test_app_config_default,
+        "Temporal_Mean_S2": test_app_config_temporal_mean_s2,
+        "NDVI_Feature": test_app_config_ndvi
+    }
 
-        expected_total_obs = num_times_test * height_test * width_test
-        expected_num_features = num_s2_bands_test + 2
-        assert features_pred_flat_out.shape == (expected_total_obs, expected_num_features), "Shape mismatch for prediction features"
-        assert original_dims_out == (num_times_test, height_test, width_test), "Original dimensions mismatch"
+    for test_name, current_test_config in test_configs_to_run.items():
+        print(f"\\n--- Running GP Model Test Scenario: {test_name} ---")
         
-        # Basic check on training data points (should be less than total if there are NaNs in LST)
-        total_possible_points = num_times_test * height_test * width_test
-        num_nan_lst = np.isnan(dummy_lst_stack).sum()
-        expected_training_points = total_possible_points - num_nan_lst
-        # This assumes ATC predictions are not NaN where LST is not NaN. If ATC can be NaN, this count is more complex.
-        # And also assumes S2 is not NaN where LST is not NaN for a training point to be valid
-        # The logic `if not np.isnan(residuals[t, r, c]):` handles this implicitly.
-        # For a more robust check here, one would re-calculate clear points based on the logic.
-        # assert train_x_out.shape[0] == expected_training_points, "Number of training points mismatch"
-        print(f"Expected training points roughly: {expected_training_points}, Got: {train_x_out.shape[0]}")
-
-
-        # Test full pipeline: train_and_predict_all_gp_residuals
-        if train_x_out.shape[0] > 0: # Only run full train/predict if there is training data
-            gp_mean_map, gp_var_map = train_and_predict_all_gp_residuals(
-                preprocessed_data_test, dummy_atc_predictions, test_app_config
-            )
-            print(f"train_and_predict_all_gp_residuals output shapes:")
-            print(f"  gp_mean_map: {gp_mean_map.shape}")
-            print(f"  gp_var_map: {gp_var_map.shape}")
-            assert gp_mean_map.shape == (num_times_test, height_test, width_test)
-            assert gp_var_map.shape == (num_times_test, height_test, width_test)
-            print("GP module test completed successfully.")
+        # Add dummy NDVI to preprocessed_data if this test scenario uses NDVI
+        current_preprocessed_data_test = preprocessed_data_test_base.copy()
+        if getattr(current_test_config, 'GP_USE_NDVI_FEATURE', False):
+            current_preprocessed_data_test['ndvi_stack'] = dummy_ndvi_stack
+            print("  (Added dummy NDVI stack for this test scenario)")
         else:
-            print("Skipping full GP train/predict test as no training data was generated (e.g., all LST was NaN).")
-            # Test the case where no training data is available
-            dummy_lst_all_nan = np.full_like(dummy_lst_stack, np.nan)
-            preprocessed_data_all_nan_lst = preprocessed_data_test.copy()
-            preprocessed_data_all_nan_lst["lst_stack"] = dummy_lst_all_nan
-            gp_mean_map_no_train, gp_var_map_no_train = train_and_predict_all_gp_residuals(
-                preprocessed_data_all_nan_lst, dummy_atc_predictions, test_app_config
-            )
-            assert np.all(np.isnan(gp_mean_map_no_train)), "Mean map should be all NaN if no training data"
-            assert np.all(np.isnan(gp_var_map_no_train)), "Variance map should be all NaN if no training data"
-            print("GP module test for no training data completed successfully.")
+            # Ensure ndvi_stack is not present if not testing NDVI, or is None
+            current_preprocessed_data_test['ndvi_stack'] = None 
 
-    except Exception as e:
-        print(f"Error during GP module test: {e}")
-        import traceback
-        traceback.print_exc()
+        try:
+            # Test data preparation
+            train_x_out, train_y_out, features_pred_flat_out, original_dims_out = prepare_gp_training_data(
+                current_preprocessed_data_test, dummy_atc_predictions, current_test_config
+            )
+            print(f"prepare_gp_training_data output shapes for {test_name}:")
+            print(f"  train_x: {train_x_out.shape}")
+            print(f"  train_y: {train_y_out.shape}")
+            print(f"  features_pred_flat: {features_pred_flat_out.shape}")
+            print(f"  original_dims: {original_dims_out}")
+
+            expected_total_obs = num_times_test * height_test * width_test
+            # Determine expected number of features based on the current test config
+            if getattr(current_test_config, 'GP_USE_NDVI_FEATURE', False):
+                expected_num_features_for_test = 1 + 2 # NDVI + lon + lat
+            else:
+                expected_num_features_for_test = num_s2_bands_test + 2 # S2 bands + lon + lat
+            
+            assert features_pred_flat_out.shape == (expected_total_obs, expected_num_features_for_test), \
+                f"Shape mismatch for prediction features in {test_name}. Expected ({expected_total_obs}, {expected_num_features_for_test}), Got {features_pred_flat_out.shape}"
+            assert original_dims_out == (num_times_test, height_test, width_test), f"Original dimensions mismatch in {test_name}"
+            assert train_x_out.shape[1] == expected_num_features_for_test, \
+                f"Number of features in train_x is incorrect for {test_name}. Expected {expected_num_features_for_test}, Got {train_x_out.shape[1]}"
+
+            # Basic check on training data points (should be less than total if there are NaNs in LST or features)
+            # This check becomes more complex with conditional features, so focusing on shapes primarily.
+            print(f"Number of training points for {test_name}: {train_x_out.shape[0]}")
+
+            # Test full pipeline: train_and_predict_all_gp_residuals
+            if train_x_out.shape[0] > 0: # Only run full train/predict if there is training data
+                gp_mean_map, gp_var_map = train_and_predict_all_gp_residuals(
+                    current_preprocessed_data_test, dummy_atc_predictions, current_test_config
+                )
+                print(f"train_and_predict_all_gp_residuals output shapes for {test_name}:")
+                print(f"  gp_mean_map: {gp_mean_map.shape}")
+                print(f"  gp_var_map: {gp_var_map.shape}")
+                assert gp_mean_map.shape == (num_times_test, height_test, width_test)
+                assert gp_var_map.shape == (num_times_test, height_test, width_test)
+                print(f"GP module test completed successfully for {test_name}.")
+            else:
+                print("Skipping full GP train/predict test as no training data was generated (e.g., all LST was NaN).")
+                # Test the case where no training data is available
+                dummy_lst_all_nan = np.full_like(dummy_lst_stack, np.nan)
+                preprocessed_data_all_nan_lst = current_preprocessed_data_test.copy()
+                preprocessed_data_all_nan_lst["lst_stack"] = dummy_lst_all_nan
+                gp_mean_map_no_train, gp_var_map_no_train = train_and_predict_all_gp_residuals(
+                    preprocessed_data_all_nan_lst, dummy_atc_predictions, current_test_config
+                )
+                assert np.all(np.isnan(gp_mean_map_no_train)), f"Mean map should be all NaN if no training data ({test_name})"
+                assert np.all(np.isnan(gp_var_map_no_train)), f"Variance map should be all NaN if no training data ({test_name})"
+                print(f"GP module test for no training data completed successfully for {test_name}.")
+
+        except Exception as e:
+            print(f"Error during GP module test ({test_name}): {e}")
+            import traceback
+            traceback.print_exc()
 
     print("Finished GP Model module main execution.") 

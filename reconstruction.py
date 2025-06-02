@@ -63,6 +63,7 @@ def combine_predictions(
                 # The primary goal is to fill gaps where LST is missing due to clouds.
 
                 if not np.isnan(lst_observed[t, r, c]): # Pixel is clear if observed LST is not NaN
+                # if False:
                     # Pixel is clear and has a valid observation
                     reconstructed_lst[t, r, c] = lst_observed[t, r, c]
                     # Uncertainty for clear pixels: can be just GP variance (spatial uncertainty)
@@ -73,23 +74,36 @@ def combine_predictions(
                     total_variance[t, r, c] = atc_variance[t, r, c] + gp_variance_residuals_expanded[t, r, c]
                 
                 else: # Pixel is cloudy or missing LST data
-                    # The problem statement: 
-                    # "For days with partial observations: T_reconstructed = T_ATC + T_GP."
-                    # "For days with no observations: T_reconstructed = T_ATC."
-                    # This logic seems to apply to a *region* or *day*, not pixel-wise directly for the GP part.
-                    # GP residuals are modeled based on S2/coords, so they *can* be added everywhere.
-                    # Let's assume the most general case: T_reconstructed = T_ATC + T_GP_residual for all cloudy/missing pixels.
-                    # If a day has NO observations at all in a region, one might argue GP has less support, 
-                    # but the model is trained on all clear data across time.
-                    
-                    # If atc_prediction is NaN (e.g., pixel had too little data to train ATC), then reconstructed is also NaN
+                    # If atc_prediction itself is NaN (e.g., pixel had insufficient data for ATC model, 
+                    # or underlying ERA5 was all NaN), then reconstructed LST is also NaN.
                     if np.isnan(atc_predictions[t, r, c]):
                         reconstructed_lst[t, r, c] = np.nan
                         total_variance[t, r, c] = np.nan
                         continue
                         
-                    reconstructed_lst[t, r, c] = atc_predictions[t, r, c] + gp_mean_residuals_expanded[t, r, c]
-                    total_variance[t, r, c] = atc_variance[t, r, c] + gp_variance_residuals_expanded[t, r, c]
+                    # Now, ATC prediction is valid. Check GP prediction.
+                    current_gp_mean_residual = gp_mean_residuals_expanded[t, r, c]
+                    current_gp_variance_residual = gp_variance_residuals_expanded[t, r, c]
+
+                    if np.isnan(current_gp_mean_residual) or np.isnan(current_gp_variance_residual):
+                        # GP prediction is NaN, use only ATC prediction and its variance.
+                        reconstructed_lst[t, r, c] = atc_predictions[t, r, c]
+                        # If ATC variance is also NaN (should ideally not happen if ATC pred is valid, but check)
+                        if np.isnan(atc_variance[t, r, c]):
+                            total_variance[t, r, c] = np.nan # Or a default high variance
+                        else:
+                            total_variance[t, r, c] = atc_variance[t, r, c]
+                    else:
+                        # Both ATC and GP predictions are valid, combine them.
+                        reconstructed_lst[t, r, c] = atc_predictions[t, r, c] + current_gp_mean_residual
+                        # Sum variances (assuming independence or as an approximation)
+                        # Ensure atc_variance is not NaN before adding
+                        if np.isnan(atc_variance[t, r, c]):
+                             # This case implies ATC pred was fine but variance was NaN. 
+                             # Total variance becomes GP variance or NaN if GP variance is also NaN (already handled by outer if)
+                            total_variance[t, r, c] = current_gp_variance_residual 
+                        else:
+                            total_variance[t, r, c] = atc_variance[t, r, c] + current_gp_variance_residual
 
     # Ensure variances are non-negative (e.g. due to numerical precision)
     total_variance[total_variance < 0] = 0 

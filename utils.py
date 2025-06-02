@@ -336,25 +336,32 @@ def visualize_daily_stacks_comparison(
     lst_observed_stack: np.ndarray, 
     reconstructed_lst_stack: np.ndarray, 
     s2_reflectance_stack: np.ndarray, # (time, bands, H, W)
+    ndvi_stack: np.ndarray, # (time, H, W), can be None
     common_dates: list, 
     output_base_dir: str, # e.g., config.OUTPUT_DIR
     roi_name: str,
+    app_config: 'config', # Added to access GP_USE_NDVI_FEATURE
     s2_rgb_indices: tuple = (2, 1, 0), # (R, G, B) assuming B2,B3,B4,B8 -> B4=idx 2, B3=idx 1, B2=idx 0
-    max_days_to_plot: int = 7 # Limit the number of columns for readability
+    max_days_to_plot: int = 10, # Limit the number of columns for readability
+    lst_contrast_percentiles: tuple = (2, 98) # Percentiles for LST contrast stretching (e.g., 2nd and 98th)
 ):
     """
-    Visualizes a comparison of observed LST, reconstructed LST, and S2 RGB images 
+    Visualizes a comparison of observed LST, reconstructed LST, and either S2 RGB or NDVI images 
     across multiple days in a grid plot.
 
     Args:
         lst_observed_stack (np.ndarray): (time, H, W) stack of observed LST.
         reconstructed_lst_stack (np.ndarray): (time, H, W) stack of reconstructed LST.
         s2_reflectance_stack (np.ndarray): (time, bands, H, W) stack of S2 reflectance.
+        ndvi_stack (np.ndarray): (time, H, W) stack of NDVI data, can be None.
         common_dates (list): List of datetime objects corresponding to the time dimension.
         output_base_dir (str): Base output directory (e.g., config.OUTPUT_DIR).
         roi_name (str): Name of the ROI for filenames and titles.
+        app_config (config): The application configuration object.
         s2_rgb_indices (tuple): Indices for R, G, B bands in the s2_reflectance_stack's band dimension.
         max_days_to_plot (int): Maximum number of days (columns) to plot.
+        lst_contrast_percentiles (tuple): Lower and upper percentiles to clip LST data for contrast enhancement.
+                                         Set to (0, 100) or None to use absolute min/max.
     """
     try:
         import matplotlib.pyplot as plt
@@ -372,49 +379,90 @@ def visualize_daily_stacks_comparison(
     fig, axes = plt.subplots(3, num_days, figsize=(num_days * 4, 3 * 4), squeeze=False)
     # squeeze=False ensures axes is always 2D, even if num_days=1
     
-    fig.suptitle(f"Daily Comparison for {roi_name} (Observed LST, Reconstructed LST, S2 RGB)", fontsize=16, y=0.99)
+    plot_title_suffix = "S2 RGB"
+    if getattr(app_config, 'GP_USE_NDVI_FEATURE', False) and ndvi_stack is not None:
+        plot_title_suffix = "NDVI"
+
+    fig.suptitle(f"Daily Comparison for {roi_name} (Observed LST, Reconstructed LST, {plot_title_suffix})", fontsize=16, y=0.99)
 
     # Determine common min/max for LST plots for consistent color scaling across days
     valid_obs_lst_values = lst_observed_stack[~np.isnan(lst_observed_stack)]
     valid_recon_lst_values = reconstructed_lst_stack[~np.isnan(reconstructed_lst_stack)]
     
-    lst_min, lst_max = 270, 320 # Default fallback
+    lst_min_val, lst_max_val = (270, 320) # Default fallback
+
     if valid_obs_lst_values.size > 0 and valid_recon_lst_values.size > 0:
-        overall_min = min(np.min(valid_obs_lst_values), np.min(valid_recon_lst_values))
-        overall_max = max(np.max(valid_obs_lst_values), np.max(valid_recon_lst_values))
-        lst_min, lst_max = overall_min, overall_max
+        combined_lst_values = np.concatenate((valid_obs_lst_values, valid_recon_lst_values))
+        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
+            p_low, p_high = lst_contrast_percentiles
+            lst_min_val = np.percentile(combined_lst_values, p_low)
+            lst_max_val = np.percentile(combined_lst_values, p_high)
+            print(f"LST visualization: Using percentile ({p_low}%, {p_high}%) scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
+        else:
+            lst_min_val = np.min(combined_lst_values)
+            lst_max_val = np.max(combined_lst_values)
+            print(f"LST visualization: Using absolute min/max scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
     elif valid_obs_lst_values.size > 0:
-        lst_min, lst_max = np.min(valid_obs_lst_values), np.max(valid_obs_lst_values)
+        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
+            p_low, p_high = lst_contrast_percentiles
+            lst_min_val = np.percentile(valid_obs_lst_values, p_low)
+            lst_max_val = np.percentile(valid_obs_lst_values, p_high)
+        else:
+            lst_min_val = np.min(valid_obs_lst_values)
+            lst_max_val = np.max(valid_obs_lst_values)
     elif valid_recon_lst_values.size > 0:
-        lst_min, lst_max = np.min(valid_recon_lst_values), np.max(valid_recon_lst_values)
+        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
+            p_low, p_high = lst_contrast_percentiles
+            lst_min_val = np.percentile(valid_recon_lst_values, p_low)
+            lst_max_val = np.percentile(valid_recon_lst_values, p_high)
+        else:
+            lst_min_val = np.min(valid_recon_lst_values)
+            lst_max_val = np.max(valid_recon_lst_values)
+    
+    # Ensure min_val is not greater than max_val after percentile clipping, can happen with near-constant images
+    if lst_min_val >= lst_max_val:
+        lst_min_val = lst_max_val - 1 # Arbitrary small difference to make imshow happy
+        print(f"Warning: LST min_val >= max_val after percentile clip. Adjusted to min={lst_min_val:.2f}, max={lst_max_val:.2f}")
 
     for i in range(num_days):
         date_str = common_dates[i].strftime('%Y-%m-%d')
         
         # Row 0: Observed LST
         ax_obs = axes[0, i]
-        im_obs = ax_obs.imshow(lst_observed_stack[i], cmap='plasma', vmin=lst_min, vmax=lst_max)
-        ax_obs.set_title(f"{date_str}\nObserved LST")
-        ax_obs.set_xticks([])
-        ax_obs.set_yticks([])
+        im_obs = ax_obs.imshow(lst_observed_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+        ax_obs.set_title(f"{date_str}\nObserved LST (K)")
+        ax_obs.axis('off')
         if i == 0: ax_obs.set_ylabel("Observed LST", fontsize=12)
 
         # Row 1: Reconstructed LST
         ax_recon = axes[1, i]
-        im_recon = ax_recon.imshow(reconstructed_lst_stack[i], cmap='plasma', vmin=lst_min, vmax=lst_max)
-        ax_recon.set_title(f"Reconstructed LST") # Date is already in column title from above
-        ax_recon.set_xticks([])
-        ax_recon.set_yticks([])
+        im_recon = ax_recon.imshow(reconstructed_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+        ax_recon.set_title(f"Reconstructed LST (K)") # Date is already in column title from above
+        ax_recon.axis('off')
         if i == 0: ax_recon.set_ylabel("Reconstructed LST", fontsize=12)
 
-        # Row 2: S2 RGB
-        ax_s2 = axes[2, i]
-        if s2_reflectance_stack is not None and s2_reflectance_stack.shape[0] > i:
-            plot_s2_rgb(s2_reflectance_stack[i], ax_s2, title=f"S2 RGB", band_indices_rgb=s2_rgb_indices)
+        # Row 2: S2 RGB or NDVI
+        ax_s2_or_ndvi = axes[2, i]
+        use_ndvi_plot = getattr(app_config, 'GP_USE_NDVI_FEATURE', False)
+
+        if use_ndvi_plot and ndvi_stack is not None and ndvi_stack.shape[0] > i:
+            im_ndvi = ax_s2_or_ndvi.imshow(ndvi_stack[i], cmap='RdYlGn', vmin=-1, vmax=1)
+            ax_s2_or_ndvi.set_title(f"NDVI")
+            ax_s2_or_ndvi.axis('off')
+            # Optional: Add a colorbar for NDVI if desired, though often the range is standard
+            # if i == num_days - 1: # Add colorbar to the last plot
+            #     fig.colorbar(im_ndvi, ax=ax_s2_or_ndvi, orientation='vertical', label='NDVI', fraction=0.046, pad=0.04)
+        elif s2_reflectance_stack is not None and s2_reflectance_stack.shape[0] > i:
+            plot_s2_rgb(s2_reflectance_stack[i], ax_s2_or_ndvi, title=f"S2 RGB", band_indices_rgb=s2_rgb_indices)
+            # plot_s2_rgb already calls axis('off')
         else:
-            ax_s2.text(0.5, 0.5, 'S2 Data Not Available', horizontalalignment='center', verticalalignment='center')
-            ax_s2.set_title(f"S2 RGB")
-        if i == 0: ax_s2.set_ylabel("S2 RGB", fontsize=12)
+            ax_s2_or_ndvi.text(0.5, 0.5, 'Image Data Not Available', horizontalalignment='center', verticalalignment='center')
+            ax_s2_or_ndvi.set_title(f"{plot_title_suffix}")
+            ax_s2_or_ndvi.axis('off')
+
+        if i == 0:
+            y_label_row2 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
+            ax_s2_or_ndvi.set_ylabel(y_label_row2, fontsize=12)
 
     # Add a single colorbar for LST plots, if desired, or individual ones are fine too.
     # For simplicity, no shared colorbar here. Each plot implicitly shows its scale via vmin/vmax.

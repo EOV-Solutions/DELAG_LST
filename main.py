@@ -48,10 +48,47 @@ def main():
     # 2. Train ATC Model and Get Predictions/Variance
     print("\nStep 2: ATC Model Training and Prediction")
     try:
-        atc_mean_predictions, atc_variance = atc_model.train_all_atc_models(
+        # Phase 2.1: Train ATC models and save snapshots
+        print("  Phase 2.1: Training ATC models and collecting snapshots...")
+        all_pixel_snapshots = atc_model.train_and_collect_all_atc_snapshots(
             preprocessed_data, config
         )
-        # Save ATC outputs (optional, for debugging or intermediate results)
+
+        # Define path for saving snapshots
+        # Ensure MODEL_WEIGHTS_PATH is defined in your config and the directory exists
+        # utils.create_output_directories should ideally create this too if it's under OUTPUT_DIR
+        snapshots_filename = f"atc_snapshots_{preprocessed_data.get('roi_name', 'all')}.npz"
+        snapshots_filepath = os.path.join(config.MODEL_WEIGHTS_PATH, snapshots_filename)
+        
+        print(f"  Saving ATC snapshots to {snapshots_filepath}...")
+        # Get image dimensions from one of the stacks, e.g., LST stack
+        _, height, width = preprocessed_data['lst_stack'].shape 
+        atc_model.save_atc_snapshots(
+            all_pixel_snapshots, 
+            snapshots_filepath,
+            image_height=height,
+            image_width=width,
+            num_snapshots_expected=config.ATC_ENSEMBLE_SNAPSHOTS
+        )
+        print("  ATC snapshots saved.")
+
+        # Phase 2.2: Load ATC snapshots and predict
+        print("  Phase 2.2: Loading ATC snapshots and performing prediction...")
+        loaded_snapshots_data = atc_model.load_atc_snapshots(snapshots_filepath)
+        
+        # For prediction, we use the full timeline DOY and ERA5 from preprocessed_data
+        # as the target prediction timeline.
+        doy_for_prediction = preprocessed_data["doy_stack"]
+        era5_for_prediction = preprocessed_data["era5_stack"]
+
+        atc_mean_predictions, atc_variance = atc_model.predict_atc_from_loaded_snapshots(
+            loaded_snapshots_data,
+            doy_for_prediction_numpy=doy_for_prediction,
+            era5_for_prediction_numpy=era5_for_prediction,
+            app_config=config
+        )
+        
+        # Optional: save ATC outputs (for debugging or intermediate results)
         # utils.save_array_as_geotiff(atc_mean_predictions, preprocessed_data['reference_grid_path'], 
         #                               os.path.join(config.OUTPUT_DIR, 'atc_mean_predictions.tif'))
         # utils.save_array_as_geotiff(atc_variance, preprocessed_data['reference_grid_path'], 
@@ -196,15 +233,17 @@ def main():
         try:
             # Assuming S2 bands are [B2, B3, B4, B8], so RGB indices are (B4=2, B3=1, B2=0)
             s2_rgb_indices_param = getattr(config, 'S2_RGB_INDICES', (2, 1, 0)) 
-            max_days_plot_param = getattr(config, 'MAX_DAYS_FOR_DAILY_VISUALIZATION_PLOT', 7)
+            max_days_plot_param = getattr(config, 'MAX_DAYS_FOR_DAILY_VISUALIZATION_PLOT', 10)
 
             utils.visualize_daily_stacks_comparison(
                 lst_observed_stack=preprocessed_data['lst_stack'],
                 reconstructed_lst_stack=reconstructed_lst,
                 s2_reflectance_stack=preprocessed_data['s2_reflectance_stack'],
+                ndvi_stack=preprocessed_data.get('ndvi_stack'), # Pass NDVI stack, could be None
                 common_dates=preprocessed_data['common_dates'],
                 output_base_dir=config.OUTPUT_DIR, 
                 roi_name=preprocessed_data.get('roi_name', 'UnknownROI'),
+                app_config=config, # Pass the config object
                 s2_rgb_indices=s2_rgb_indices_param,
                 max_days_to_plot=max_days_plot_param
             )
