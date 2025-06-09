@@ -9,7 +9,7 @@ import numpy as np
 
 # 1. Define paths to your data folders
 base_data_path = "DELAG_LST/KhanhXuan_BuonMaThuot_DakLak/"
-s2_folder = os.path.join(base_data_path, "s2_images")
+# s2_folder = os.path.join(base_data_path, "s2_images")
 ndvi_folder = os.path.join(base_data_path, "ndvi_infer")
 lst_folder = os.path.join(base_data_path, "lst")
 era5_folder = os.path.join(base_data_path, "era5")
@@ -23,7 +23,7 @@ def extract_date_from_filename(filename):
 
 # 3. Get all file paths and extract dates
 all_files = []
-for folder in [s2_folder, ndvi_folder, lst_folder, era5_folder]:
+for folder in [ndvi_folder, lst_folder, era5_folder]:
     for f_name in os.listdir(folder):
         if f_name.endswith(".tif"):
             full_path = os.path.join(folder, f_name)
@@ -95,15 +95,16 @@ for period_start, types_in_period in grouped_files.items():
                     red_raw = src.read(1).astype(np.float32)
                     green_raw = src.read(2).astype(np.float32)
                     blue_raw = src.read(3).astype(np.float32)
-                    nir = src.read(4).astype(np.float32)
+                    nir = src.read(4).astype(np.float32) # NIR band
 
-                    print(f"    Raw Red band stats: min={np.nanmin(red_raw):.2f}, max={np.nanmax(red_raw):.2f}, mean={np.nanmean(red_raw):.2f}, dtype={red_raw.dtype}, shape={red_raw.shape}")
-                    print(f"    Raw Green band stats: min={np.nanmin(green_raw):.2f}, max={np.nanmax(green_raw):.2f}, mean={np.nanmean(green_raw):.2f}, dtype={green_raw.dtype}, shape={green_raw.shape}")
-                    print(f"    Raw Blue band stats: min={np.nanmin(blue_raw):.2f}, max={np.nanmax(blue_raw):.2f}, mean={np.nanmean(blue_raw):.2f}, dtype={blue_raw.dtype}, shape={blue_raw.shape}")
+                    # The following print statements are commented out but can be useful for debugging band statistics.
+                    # print(f"    Raw Red band stats: min={np.nanmin(red_raw):.2f}, max={np.nanmax(red_raw):.2f}, mean={np.nanmean(red_raw):.2f}, dtype={red_raw.dtype}, shape={red_raw.shape}")
+                    # print(f"    Raw Green band stats: min={np.nanmin(green_raw):.2f}, max={np.nanmax(green_raw):.2f}, mean={np.nanmean(green_raw):.2f}, dtype={green_raw.dtype}, shape={green_raw.shape}")
+                    # print(f"    Raw Blue band stats: min={np.nanmin(blue_raw):.2f}, max={np.nanmax(blue_raw):.2f}, mean={np.nanmean(blue_raw):.2f}, dtype={blue_raw.dtype}, shape={blue_raw.shape}")
                     
-                    # Check for all NaNs
-                    if np.all(np.isnan(red_raw)) or np.all(np.isnan(green_raw)) or np.all(np.isnan(blue_raw)):
-                        print("    WARNING: One or more raw RGB bands are all NaN.")
+                    # # Check for all NaNs in raw bands (useful for debugging)
+                    # if np.all(np.isnan(red_raw)) or np.all(np.isnan(green_raw)) or np.all(np.isnan(blue_raw)):
+                    #     print("    WARNING: One or more raw RGB bands are all NaN.")
 
                     # Normalize for display (simple min-max scaling)
                     def normalize_percentile(band, band_name="", p_low=2, p_high=98):
@@ -131,19 +132,21 @@ for period_start, types_in_period in grouped_files.items():
                         normalized_band = (clipped_band - low_val) / (high_val - low_val + 1e-8)
                         return normalized_band
 
-                    red_norm = normalize_percentile(red_raw, "Red")
-                    green_norm = normalize_percentile(green_raw, "Green")
-                    blue_norm = normalize_percentile(blue_raw, "Blue")
+                    red_norm = normalize_percentile(red_raw, "Red") # Normalize Red band
+                    green_norm = normalize_percentile(green_raw, "Green") # Normalize Green band
+                    blue_norm = normalize_percentile(blue_raw, "Blue") # Normalize Blue band
 
-                    print(f"    Normalized Red band stats: min={np.nanmin(red_norm):.2f}, max={np.nanmax(red_norm):.2f}, mean={np.nanmean(red_norm):.2f}")
-                    print(f"    Normalized Green band stats: min={np.nanmin(green_norm):.2f}, max={np.nanmax(green_norm):.2f}, mean={np.nanmean(green_norm):.2f}")
-                    print(f"    Normalized Blue band stats: min={np.nanmin(blue_norm):.2f}, max={np.nanmax(blue_norm):.2f}, mean={np.nanmean(blue_norm):.2f}")
+                    # The following print statements are commented out but can be useful for debugging normalized band statistics.
+                    # print(f"    Normalized Red band stats: min={np.nanmin(red_norm):.2f}, max={np.nanmax(red_norm):.2f}, mean={np.nanmean(red_norm):.2f}")
+                    # print(f"    Normalized Green band stats: min={np.nanmin(green_norm):.2f}, max={np.nanmax(green_norm):.2f}, mean={np.nanmean(green_norm):.2f}")
+                    # print(f"    Normalized Blue band stats: min={np.nanmin(blue_norm):.2f}, max={np.nanmax(blue_norm):.2f}, mean={np.nanmean(blue_norm):.2f}")
 
                     rgb_image = np.dstack((red_norm, green_norm, blue_norm))
                     
                     # Check if normalized image is all NaN
                     if np.all(np.isnan(rgb_image)):
-                        print("    WARNING: Normalized RGB image is all NaN. Plot will be blank.")
+                        # print("    WARNING: Normalized RGB image is all NaN. Plot will be blank.") # Useful debug for blank plots
+                        pass # Added pass to fix empty block
                     
                     # Plot RGB
                     ax_rgb = axes[current_ax_idx]

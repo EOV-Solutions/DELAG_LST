@@ -4,6 +4,7 @@ Main script to run the DELAG LST reconstruction pipeline.
 import numpy as np
 import torch
 import os
+import json
 
 # Import project modules
 import config
@@ -338,6 +339,7 @@ def main():
                 lst_observed_stack=preprocessed_data['lst_stack'],
                 model_predicted_lst_stack=model_predictions_for_eval, # ADDED: Pass model's direct predictions
                 reconstructed_lst_stack=reconstructed_lst,
+                era5_stack=preprocessed_data['era5_stack'], # ADDED: Pass ERA5 stack
                 s2_reflectance_stack=preprocessed_data['s2_reflectance_stack'],
                 ndvi_stack=preprocessed_data.get('ndvi_stack'), # Pass NDVI stack, could be None
                 common_dates=preprocessed_data['common_dates'],
@@ -355,6 +357,19 @@ def main():
         print("Skipping daily comparison visualization as not all required data stacks are available.")
     
     print("\nDELAG LST Reconstruction Pipeline Completed.")
+
+    # Save the configuration used for this run
+    print("\nStep 7: Saving Run Configuration")
+    try:
+        config_dict = {key: getattr(config, key) for key in dir(config) if not key.startswith('__') and not callable(getattr(config, key))}
+        config_filename = os.path.join(config.OUTPUT_DIR, 'run_config.json')
+        with open(config_filename, 'w') as f:
+            json.dump(config_dict, f, indent=4, default=str) # Use default=str to handle non-serializable types like Path objects if any
+        print(f"Run configuration saved to {config_filename}")
+    except Exception as e:
+        print(f"Error saving run configuration: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     # Before running, ensure that:

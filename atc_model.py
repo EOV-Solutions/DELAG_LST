@@ -9,6 +9,8 @@ from tqdm import tqdm
 import os
 from joblib import Parallel, delayed # Added for parallelization
 import config # Assuming your config.py is in the same directory or accessible
+import utils # Added for the new plotting function
+
 
 class EnhancedATCModel(nn.Module):
     """
@@ -26,22 +28,24 @@ class EnhancedATCModel(nn.Module):
         self.A = nn.Parameter(torch.tensor(initial_params.get('A', 10.0) if initial_params else 10.0))   # Amplitude in Kelvin
         self.phi = nn.Parameter(torch.tensor(initial_params.get('phi', 180.0) if initial_params else 180.0)) # Phase shift in days
         self.b = nn.Parameter(torch.tensor(initial_params.get('b', 0.5) if initial_params else 0.5))     # ERA5 coefficient
+        # New parameter for log standard deviation of observation noise
+        self.log_sigma = nn.Parameter(torch.tensor(initial_params.get('log_sigma', 0.0) if initial_params else 0.0)) # log(sigma), so sigma starts at exp(0)=1
         
         self.days_in_year = config.DAYS_OF_YEAR # From config file
 
-    def forward(self, doy: torch.Tensor, t_era5: torch.Tensor) -> torch.Tensor:
+    def forward(self, doy: torch.Tensor, t_era5_1: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the ATC model.
 
         Args:
             doy (torch.Tensor): Day of year (1 to self.days_in_year).
-            t_era5 (torch.Tensor): ERA5 skin temperature for the corresponding doy.
+            t_era5_1 (torch.Tensor): ERA5 band 1 values for the corresponding doy.
 
         Returns:
             torch.Tensor: Predicted LST (T_ATC).
         """
         term_cos = torch.cos(2 * np.pi / self.days_in_year * (doy - self.phi))
-        t_atc = self.C + self.A * term_cos + self.b * t_era5
+        t_atc = self.C + self.A * term_cos + self.b * t_era5_1
         return t_atc
 
 def train_atc_model_pixelwise(
@@ -50,9 +54,11 @@ def train_atc_model_pixelwise(
     pixel_era5_clear: np.ndarray,
     app_config: 'config',
     pixel_identifier: str = "" # Keep for potential diagnostic messages
-) -> tuple[EnhancedATCModel, list[dict], list[float]]: # Added list[float] for interval losses
+) -> tuple[EnhancedATCModel | None, list[dict], list[float]]: # Model can be None
     """
-    Trains the Enhanced ATC model for a single pixel.
+    Trains the Enhanced ATC model for a single pixel using a two-phase approach.
+    Phase 1: Search for optimal initial parameters by running short training trials.
+    Phase 2: Train the model fully starting with the best initial parameters found.
 
     Args:
         pixel_lst_clear (np.ndarray): Clear-sky LST observations for the pixel (1D array).
@@ -62,82 +68,168 @@ def train_atc_model_pixelwise(
         pixel_identifier (str, optional): Identifier for the pixel for logging.
 
     Returns:
-        tuple[EnhancedATCModel, list[dict], list[float]]: 
+        tuple[EnhancedATCModel | None, list[dict], list[float]]: 
             - The trained ATC model for the pixel.
             - A list of model state_dict snapshots for ensemble.
-            - A list of mean losses for each logging interval.
+            - A list of mean losses for each logging interval over the total epochs.
     """
-    device = torch.device(app_config.DEVICE if torch.cuda.is_available() else "cpu")
+    device = torch.device(app_config.ATC_DEVICE if torch.cuda.is_available() else "cpu")
 
     # Convert inputs to tensors
     lst_tensor = torch.from_numpy(pixel_lst_clear).float().to(device)
     doy_tensor = torch.from_numpy(pixel_doy_clear).float().to(device)
-    era5_tensor = torch.from_numpy(pixel_era5_clear).float().to(device)
+    # pixel_era5_clear is expected shape (N, 2)
+    era5_tensor_1 = torch.from_numpy(pixel_era5_clear[:, 0]).float().to(device)
 
-    # Initialize model and optimizer
-    # Potentially initialize params based on data statistics (e.g., C ~ mean(LST), A ~ std(LST))
-    initial_C = np.nanmean(pixel_lst_clear) if len(pixel_lst_clear) > 0 else 290.0
-    initial_A = np.nanstd(pixel_lst_clear) if len(pixel_lst_clear) > 1 else 10.0
-    initial_phi = 180.0 # Mid-year peak, can be further refined
-    initial_b = 0.5
-    # Ensure initial_params are not NaN or Inf
-    initial_params = {
-        'C': float(initial_C) if np.isfinite(initial_C) else 290.0,
-        'A': float(initial_A) if np.isfinite(initial_A) and initial_A > 0 else 10.0,
-        'phi': float(initial_phi),
-        'b': float(initial_b)
-    }
+    # --- Phase 1: Search for best initial parameters ---
+    init_search_trials = getattr(app_config, 'ATC_INIT_SEARCH_TRIALS', 200)
+    init_search_epochs = getattr(app_config, 'ATC_INIT_SEARCH_EPOCHS', 200)
+    # print(f"ATC_INIT_SEARCH_TRIALS: {init_search_trials}, ATC_INIT_SEARCH_EPOCHS: {init_search_epochs}")
+    
+    best_initial_params = None
+    best_loss = float('inf')
 
-    atc_model = EnhancedATCModel(initial_params=initial_params).to(device)
-    optimizer = optim.Adam(atc_model.parameters(), lr=app_config.ATC_LEARNING_RATE)
-    criterion = nn.MSELoss()
+    # Base values for randomization
+    initial_C_base = np.nanmean(pixel_lst_clear) if len(pixel_lst_clear) > 0 else 290.0
+    initial_A_base = np.nanstd(pixel_lst_clear) if len(pixel_lst_clear) > 1 else 10.0
+    initial_phi_base = 180.0
+    initial_b_base = 0.1
+    
+    initial_C_base_val = float(initial_C_base) if np.isfinite(initial_C_base) else 290.0
+    initial_A_base_val = float(initial_A_base) if np.isfinite(initial_A_base) and initial_A_base > 0 else 10.0
+
+    for _ in range(init_search_trials):
+        # Randomize initial parameters as requested: base * random_float(0-1)
+        trial_initial_params = {
+            'C': initial_C_base_val * np.random.rand()/2,
+            'A': initial_A_base_val * np.random.rand()/2,
+            'phi': initial_phi_base * np.random.rand()/2,
+            'b': initial_b_base * np.random.rand()/2,
+            'log_sigma': 0.0 # Not randomized
+        }
+        
+        # Short training for this trial
+        atc_model_trial = EnhancedATCModel(initial_params=trial_initial_params).to(device)
+        optimizer_trial = optim.Adam(atc_model_trial.parameters(), lr=app_config.ATC_LEARNING_RATE)
+        trial_final_loss = float('inf')
+
+        for _ in range(init_search_epochs):
+            atc_model_trial.train()
+            optimizer_trial.zero_grad()
+            
+            predictions_mean = atc_model_trial(doy_tensor, era5_tensor_1)
+            
+            log_sigma_val = atc_model_trial.log_sigma
+            variance = torch.exp(2 * log_sigma_val).clamp(min=1e-6)
+            nll_terms = 0.5 * torch.log(2 * np.pi * variance) + 0.5 * ((lst_tensor - predictions_mean).pow(2) / variance)
+            loss = torch.mean(nll_terms)
+            
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                trial_final_loss = float('inf')
+                break # This trial with these initial params failed
+
+            loss.backward()
+            optimizer_trial.step()
+            trial_final_loss = loss.item()
+        
+        if not np.isinf(trial_final_loss) and trial_final_loss < best_loss:
+            best_loss = trial_final_loss
+            best_initial_params = trial_initial_params
+
+    # Fallback to deterministic initialization if search fails to find any valid params
+    if best_initial_params is None:
+        best_initial_params = {
+            'C': initial_C_base_val,
+            'A': initial_A_base_val,
+            'phi': initial_phi_base,
+            'b': initial_b_base,
+            'log_sigma': 0.0
+        }
+
+    # --- Phase 2: Full training with best initial parameters ---
+    atc_model = EnhancedATCModel(initial_params=best_initial_params).to(device)
+    optimizer = optim.Adam(atc_model.parameters(), 
+                           lr=app_config.ATC_LEARNING_RATE, 
+                           weight_decay=getattr(app_config, 'ATC_WEIGHT_DECAY', 0.0))
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='min', 
+        factor=getattr(app_config, 'ATC_LR_SCHEDULER_FACTOR', 0.1),
+        patience=getattr(app_config, 'ATC_LR_SCHEDULER_PATIENCE', 10),
+        min_lr=getattr(app_config, 'ATC_LR_SCHEDULER_MIN_LR', 1e-6)
+    )
 
     snapshots = []
     
     # Loss logging setup
     loss_logging_interval = getattr(app_config, 'ATC_LOSS_LOGGING_INTERVAL', 100)
-    num_loss_intervals = (app_config.ATC_EPOCHS + loss_logging_interval -1) // loss_logging_interval # Ceiling division
-    interval_losses_output = [np.nan] * num_loss_intervals # Initialize with NaNs
+    total_epochs = app_config.ATC_EPOCHS
+    num_loss_intervals = (total_epochs + loss_logging_interval - 1) // loss_logging_interval
+    interval_losses_output = [np.nan] * num_loss_intervals
     
     current_interval_losses = []
-    current_interval_idx = 0
 
-    for epoch in range(app_config.ATC_EPOCHS):
+    phase2_epochs = total_epochs - init_search_epochs
+    if phase2_epochs < 0:
+        phase2_epochs = 0
+        
+    last_global_epoch = -1 # To handle the case where phase2_epochs is 0
+
+    for epoch in range(phase2_epochs):
+        global_epoch = epoch + init_search_epochs
+        last_global_epoch = global_epoch
+
         atc_model.train()
         optimizer.zero_grad()
         
-        predictions = atc_model(doy_tensor, era5_tensor)
-        loss = criterion(predictions, lst_tensor)
+        predictions_mean = atc_model(doy_tensor, era5_tensor_1)
+        
+        # Calculate Gaussian Negative Log-Likelihood
+        log_sigma_val = atc_model.log_sigma
+        variance = torch.exp(2 * log_sigma_val).clamp(min=1e-6) 
+
+        nll_terms = 0.5 * torch.log(2 * np.pi * variance) + \
+                    0.5 * ((lst_tensor - predictions_mean).pow(2) / variance)
+        loss = torch.mean(nll_terms)
         
         loss.backward()
-        if torch.isnan(loss).any():
-            # print(f"  ATC_MODEL_DIAGNOSTIC: NaN loss at epoch {epoch} for {pixel_identifier}. Stopping training.") # Keep for debugging if needed
-            # For NaN loss, interval_losses_output will remain NaN for this and subsequent intervals
+        if torch.isnan(loss).any() or torch.isinf(loss).any(): # Added check for inf loss
+            # On failure in phase 2, we return what we have, which will be mostly NaNs for losses.
             return None, [], interval_losses_output # Return current state of interval_losses_output
+
         optimizer.step()
         
         current_interval_losses.append(loss.item())
 
+        # Step the scheduler
+        scheduler.step(loss)
+
         # Log loss at interval
-        if (epoch + 1) % loss_logging_interval == 0:
-            if current_interval_losses: # Should always be true here
+        if (global_epoch + 1) % loss_logging_interval == 0:
+            current_interval_idx = global_epoch // loss_logging_interval
+            if current_interval_losses and current_interval_idx < num_loss_intervals:
                 interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
             current_interval_losses = [] # Reset for next interval
-            current_interval_idx += 1
 
         # Store snapshots for ensemble
-        if (epoch >= app_config.ATC_ENSEMBLE_START_EPOCH and 
-            (epoch - app_config.ATC_ENSEMBLE_START_EPOCH) % app_config.ATC_SNAPSHOT_INTERVAL == 0):
+        if (global_epoch >= app_config.ATC_ENSEMBLE_START_EPOCH and 
+            (global_epoch - app_config.ATC_ENSEMBLE_START_EPOCH) % app_config.ATC_SNAPSHOT_INTERVAL == 0):
             snapshots.append({k: v.clone().cpu().detach() for k, v in atc_model.state_dict().items()})
             if len(snapshots) >= app_config.ATC_ENSEMBLE_SNAPSHOTS:
-                # If we break early due to enough snapshots, handle the last partial loss interval
-                if current_interval_losses and current_interval_idx < num_loss_intervals:
-                    interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
+                # If we break early, handle the last partial loss interval
+                if current_interval_losses:
+                    current_interval_idx = global_epoch // loss_logging_interval
+                    if current_interval_idx < num_loss_intervals:
+                        interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
                 break 
     
-    # Handle final partial interval if training finished all epochs
-    if current_interval_losses and current_interval_idx < num_loss_intervals and (epoch + 1) == app_config.ATC_EPOCHS:
-        interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
+    # Handle final partial interval if training finished all epochs and didn't align with an interval boundary
+    if current_interval_losses and last_global_epoch != -1:
+        current_interval_idx = last_global_epoch // loss_logging_interval
+        # Only fill if the slot hasn't been filled by other logic (e.g., snapshot break)
+        if current_interval_idx < num_loss_intervals and np.isnan(interval_losses_output[current_interval_idx]):
+             interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
 
     return atc_model, snapshots, interval_losses_output
 
@@ -153,10 +245,18 @@ def _train_pixel_atc_worker(
     """
     Worker function to train ATC for a single pixel, return snapshots and interval losses.
     """
-    worker_device_str = app_config.DEVICE
-    if app_config.DEVICE.lower() == "cuda" and getattr(app_config, 'ATC_N_JOBS', -1) != 1:
-        worker_device_str = "cpu"
-    device = torch.device(worker_device_str if torch.cuda.is_available() and worker_device_str == "cuda" else "cpu")
+    worker_device_str = app_config.ATC_DEVICE
+    if app_config.ATC_DEVICE.lower() == "cuda" and getattr(app_config, 'ATC_N_JOBS', -1) != 1:
+        # If ATC is set to CUDA but running in parallel (ATC_N_JOBS != 1),
+        # force CPU for worker to avoid issues with joblib/multiprocessing and CUDA contexts.
+        # The main process might still use CUDA for other things if DEVICE is CUDA,
+        # but these specific parallel workers will use CPU.
+        worker_device_str = "cpu" 
+        # print(f"ATC Worker Info: ATC_DEVICE is CUDA and ATC_N_JOBS != 1. Forcing CPU for this worker.") # Optional debug
+    
+    # Determine device for this worker based on the logic above
+    device = torch.device(worker_device_str if torch.cuda.is_available() and worker_device_str.lower() == "cuda" else "cpu")
+    # print(f"ATC Worker {pixel_id_str} using device: {device}") # Optional debug
 
     pixel_id_str = f"Pixel ({r},{c})"
     
@@ -173,7 +273,11 @@ def _train_pixel_atc_worker(
     pixel_doy_clear = doy_stack_all_days_numpy[clear_sky_indices]
     pixel_era5_clear = pixel_era5_all_times_slice[clear_sky_indices]
     
-    valid_data_mask = ~np.isnan(pixel_lst_clear) & ~np.isnan(pixel_era5_clear)
+    # pixel_era5_clear has two bands: shape (N,2)
+    mask_lst = ~np.isnan(pixel_lst_clear)
+    mask_era5_1 = ~np.isnan(pixel_era5_clear[:, 0])
+    mask_era5_2 = ~np.isnan(pixel_era5_clear[:, 1])
+    valid_data_mask = mask_lst & mask_era5_1 & mask_era5_2
     pixel_lst_clear_valid = pixel_lst_clear[valid_data_mask]
     pixel_doy_clear_valid = pixel_doy_clear[valid_data_mask]
     pixel_era5_clear_valid = pixel_era5_clear[valid_data_mask]
@@ -203,7 +307,8 @@ def _train_pixel_atc_worker(
         default_initial_A = float(default_initial_A) if np.isfinite(default_initial_A) and default_initial_A > 1e-6 else 10.0
         default_params_for_snapshot = {
             'C': torch.tensor(default_initial_C), 'A': torch.tensor(default_initial_A),
-            'phi': torch.tensor(180.0), 'b': torch.tensor(0.5)
+            'phi': torch.tensor(180.0), 'b': torch.tensor(0.5),
+            'log_sigma': torch.tensor(0.0) # Default log_sigma = 0 (sigma=1K)
         }
         num_needed_snapshots = app_config.ATC_ENSEMBLE_SNAPSHOTS
         while len(model_snapshots) < num_needed_snapshots:
@@ -229,6 +334,24 @@ def train_and_collect_all_atc_snapshots(
     
     num_times_obs, height, width = lst_stack.shape
 
+    # --- START: Plot input data timeseries overview --- ADDED BLOCK ---
+    if getattr(app_config, 'PLOT_INPUT_TIMESERIES_OVERVIEW', True): # Check a config flag if you want to make it optional
+        print("\nGenerating input data timeseries overview plot...")
+        try:
+            utils.plot_input_data_timeseries_overview(
+                doy_stack_numpy=doy_stack_numpy,
+                lst_stack=lst_stack,
+                era5_stack=era5_stack, # era5_stack is (time, 2, H, W)
+                training_pixel_mask=training_pixel_mask, # Can be None
+                output_dir=app_config.OUTPUT_DIR,
+                roi_name=preprocessed_data.get('roi_name', 'UnknownROI')
+            )
+        except Exception as e:
+            print(f"Warning: Failed to generate input data timeseries overview plot. Error: {e}")
+            import traceback
+            traceback.print_exc()
+    # --- END: Plot input data timeseries overview ---
+
     if training_pixel_mask is None:
         training_pixel_mask = np.ones((height, width), dtype=bool)
     elif not isinstance(training_pixel_mask, np.ndarray) or training_pixel_mask.shape != (height, width):
@@ -245,10 +368,10 @@ def train_and_collect_all_atc_snapshots(
                 tasks_args_list.append(
                     (r_iter, c_iter,
                      lst_stack[:, r_iter, c_iter].copy(),
-                     era5_stack[:, r_iter, c_iter].copy(),
+                     era5_stack[:, :, r_iter, c_iter].copy(),
                      doy_stack_numpy.copy(),
                      app_config,
-                     num_times_obs 
+                     num_times_obs
                     )
                 )
 
@@ -306,6 +429,7 @@ def save_atc_snapshots(all_pixel_snapshots: dict, filepath: str, image_height: i
     A_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
     phi_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
     b_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
+    log_sigma_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
 
     print(f"Structuring snapshots for saving. Expected snapshots per pixel: {num_snapshots_expected}")
     
@@ -315,26 +439,27 @@ def save_atc_snapshots(all_pixel_snapshots: dict, filepath: str, image_height: i
             # NaNs are already the default from np.full
             continue
         if len(snapshots_list) != num_snapshots_expected:
-            print(f"Warning: Pixel ({r},{c}) has {len(snapshots_list)} snapshots, expected {num_snapshots_expected}. This might indicate an issue or default filling.")
+            print(f"Warning: Pixel ({r},{c}) has {len(snapshots_list)} snapshots, expected {num_snapshots_expected}.")
             # Continue processing with what's available, np.full handles missing ones if list is shorter after all.
             # The worker _train_pixel_atc_worker should ideally ensure num_snapshots_expected are returned.
 
         for idx, state_dict in enumerate(snapshots_list):
-            if idx >= num_snapshots_expected: # Should not happen if worker is correct
-                print(f"Warning: Pixel ({r},{c}) had more snapshots than expected. Truncating.")
+            if idx >= num_snapshots_expected: 
                 break
-            # Ensure values are numpy floats for saving, detaching if they are tensors
-            C_stack[idx, r, c] = state_dict['C'].cpu().numpy() if torch.is_tensor(state_dict['C']) else float(state_dict['C'])
-            A_stack[idx, r, c] = state_dict['A'].cpu().numpy() if torch.is_tensor(state_dict['A']) else float(state_dict['A'])
-            phi_stack[idx, r, c] = state_dict['phi'].cpu().numpy() if torch.is_tensor(state_dict['phi']) else float(state_dict['phi'])
-            b_stack[idx, r, c] = state_dict['b'].cpu().numpy() if torch.is_tensor(state_dict['b']) else float(state_dict['b'])
+            # Gracefully get parameters; MLP state_dicts won't have these specific keys.
+            C_stack[idx, r, c] = state_dict.get('C', np.nan) if torch.is_tensor(state_dict.get('C', np.nan)) else float(state_dict.get('C', np.nan))
+            A_stack[idx, r, c] = state_dict.get('A', np.nan) if torch.is_tensor(state_dict.get('A', np.nan)) else float(state_dict.get('A', np.nan))
+            phi_stack[idx, r, c] = state_dict.get('phi', np.nan) if torch.is_tensor(state_dict.get('phi', np.nan)) else float(state_dict.get('phi', np.nan))
+            b_stack[idx, r, c] = state_dict.get('b', np.nan) if torch.is_tensor(state_dict.get('b', np.nan)) else float(state_dict.get('b', np.nan))
+            log_sigma_stack[idx, r, c] = state_dict.get('log_sigma', np.nan) if torch.is_tensor(state_dict.get('log_sigma', np.nan)) else float(state_dict.get('log_sigma', np.nan))
 
     print(f"Saving snapshot stacks to {filepath}...")
     np.savez_compressed(filepath, 
                         C_snapshots=C_stack, 
                         A_snapshots=A_stack, 
                         phi_snapshots=phi_stack, 
-                        b_snapshots=b_stack)
+                        b_snapshots=b_stack,
+                        log_sigma_snapshots=log_sigma_stack)
     print(f"Snapshots saved successfully.")
 
 def load_atc_snapshots(filepath: str) -> dict:
@@ -345,18 +470,24 @@ def load_atc_snapshots(filepath: str) -> dict:
         filepath (str): Path to the .npz file.
 
     Returns:
-        dict: A dictionary with keys 'C_snapshots', 'A_snapshots', 'phi_snapshots', 'b_snapshots',
+        dict: A dictionary with keys 'C_snapshots', 'A_snapshots', 'phi_snapshots', 'b_snapshots', 'log_sigma_snapshots',
               each mapping to a NumPy array of shape (num_snapshots, height, width).
     """
     print(f"Loading snapshots from {filepath}...")
     data = np.load(filepath)
     print("Snapshots loaded.")
-    return {
-        "C_snapshots": data['C_snapshots'],
-        "A_snapshots": data['A_snapshots'],
-        "phi_snapshots": data['phi_snapshots'],
-        "b_snapshots": data['b_snapshots']
+    # For now, assume new files won't have 'd_snapshots'. Prediction code needs to handle this.
+    # Also, this structure is for ATC model. MLP snapshots would be raw state_dicts.
+    loaded_data = {
+        "C_snapshots": data.get('C_snapshots'), # Use .get() in case file is from older version or MLP (where this won't be)
+        "A_snapshots": data.get('A_snapshots'),
+        "phi_snapshots": data.get('phi_snapshots'),
+        "b_snapshots": data.get('b_snapshots'),
+        "log_sigma_snapshots": data.get('log_sigma_snapshots')
     }
+    # It would be good to save/load ATC_MODEL_TYPE with the snapshots.
+    # For now, prediction function assumes ATC or needs modification for MLP.
+    return loaded_data
 
 def predict_atc_from_loaded_snapshots(
     loaded_snapshots_data: dict, 
@@ -382,6 +513,7 @@ def predict_atc_from_loaded_snapshots(
     A_snaps = loaded_snapshots_data['A_snapshots']
     phi_snaps = loaded_snapshots_data['phi_snapshots']
     b_snaps = loaded_snapshots_data['b_snapshots']
+    log_sigma_snaps = loaded_snapshots_data['log_sigma_snapshots']
 
     num_snapshots, height, width = C_snaps.shape
     num_times_pred = len(doy_for_prediction_numpy)
@@ -394,65 +526,86 @@ def predict_atc_from_loaded_snapshots(
 
     # Determine device for prediction models (can be global if predictions are sequential per pixel)
     # For parallelizing prediction itself (not done here), device management would be per-worker.
-    device = torch.device(app_config.DEVICE if torch.cuda.is_available() else "cpu")
+    device = torch.device(app_config.ATC_DEVICE if torch.cuda.is_available() else "cpu")
     
     # Convert DOY for prediction to a tensor once
     doy_for_prediction_tensor = torch.from_numpy(doy_for_prediction_numpy).float().to(device) # (time_pred)
 
     # Create a single model instance to reuse
     # Initialize with dummy params, will be overwritten by loaded snapshots
-    temp_model = EnhancedATCModel(initial_params={'C':0.0,'A':0.0,'phi':0.0,'b':0.0}).to(device)
+    temp_model_initial_params = {'C':0.0,'A':0.0,'phi':0.0,'b':0.0,'log_sigma':0.0}
+    temp_model = EnhancedATCModel(initial_params=temp_model_initial_params).to(device)
     temp_model.eval() # Set to evaluation mode
 
     for r in tqdm(range(height), desc="Predicting ATC (Rows)"):
         for c in range(width):
-            # Per-pixel ERA5 for prediction timeline
-            pixel_era5_pred_numpy = era5_for_prediction_numpy[:, r, c] # (time_pred)
-            pixel_era5_pred_tensor = torch.from_numpy(pixel_era5_pred_numpy).float().to(device) # (time_pred)
+            # Per-pixel ERA5 bands for prediction timeline
+            pixel_era5_pred_band1 = era5_for_prediction_numpy[:, 0, r, c]  # (time_pred)
+            pixel_era5_pred_tensor1 = torch.from_numpy(pixel_era5_pred_band1).float().to(device)
 
-            # Check if all snapshot parameters for this pixel are NaN (e.g., if source data was all NaN)
+            # Skip if no model snapshots or ERA5 parameters are all NaN
             if np.isnan(C_snaps[:, r, c]).all():
-                # print(f"Skipping prediction for pixel ({r},{c}) as all its C_snapshots are NaN.")
-                # Outputs will remain NaN as initialized
                 continue
-            
-            # If ERA5 for prediction is all NaN for this pixel, predictions will be NaN
-            if torch.isnan(pixel_era5_pred_tensor).all():
-                # print(f"ERA5 for prediction is all NaN for pixel ({r},{c}). Predictions will be NaN.")
-                # Outputs will remain NaN as initialized
+            if torch.isnan(pixel_era5_pred_tensor1).all():
                 continue
 
-            pixel_ensemble_predictions_list = [] # List to hold (time_pred) arrays
+            pixel_ensemble_predictions_list = [] # List to hold (time_pred) arrays for mean predictions
+            pixel_ensemble_sigma_sq_list = []  # List to hold (time_pred) arrays for sigma_sq from each snapshot
 
             for snap_idx in range(num_snapshots):
                 # Load parameters for the current snapshot and pixel
+                current_C = C_snaps[snap_idx, r, c]
+                current_A = A_snaps[snap_idx, r, c]
+                current_phi = phi_snaps[snap_idx, r, c]
+                current_b = b_snaps[snap_idx, r, c]
+                current_log_sigma = log_sigma_snaps[snap_idx, r, c]
+
                 current_params = {
-                    'C': torch.tensor(C_snaps[snap_idx, r, c], device=device),
-                    'A': torch.tensor(A_snaps[snap_idx, r, c], device=device),
-                    'phi': torch.tensor(phi_snaps[snap_idx, r, c], device=device),
-                    'b': torch.tensor(b_snaps[snap_idx, r, c], device=device)
+                    'C': torch.tensor(current_C, device=device),
+                    'A': torch.tensor(current_A, device=device),
+                    'phi': torch.tensor(current_phi, device=device),
+                    'b': torch.tensor(current_b, device=device),
+                    'log_sigma': torch.tensor(current_log_sigma, device=device)
                 }
                 
                 # Check if any parameter for this specific snapshot is NaN. If so, this snapshot can't predict.
-                if any(torch.isnan(p) for p in current_params.values()):
+                if any(torch.isnan(p.data) for p in current_params.values()): # Check .data for Parameter objects
                     # This snapshot's prediction will be all NaNs for this pixel
                     nan_preds_for_snapshot = np.full(num_times_pred, np.nan, dtype=np.float32)
                     pixel_ensemble_predictions_list.append(nan_preds_for_snapshot)
+                    pixel_ensemble_sigma_sq_list.append(nan_preds_for_snapshot) # Also append NaNs for sigma_sq
                     continue
 
                 temp_model.load_state_dict(current_params)
                 
                 with torch.no_grad():
-                    preds_tensor = temp_model(doy_for_prediction_tensor, pixel_era5_pred_tensor)
-                    pixel_ensemble_predictions_list.append(preds_tensor.cpu().numpy()) # Store (time_pred)
+                    # Model forward now only returns the mean prediction
+                    preds_mean_tensor = temp_model(doy_for_prediction_tensor, pixel_era5_pred_tensor1)
+                    pixel_ensemble_predictions_list.append(preds_mean_tensor.cpu().numpy()) # Store (time_pred)
+                    
+                    # Calculate sigma_sq from the loaded log_sigma for this snapshot
+                    # current_params['log_sigma'] is a tensor here
+                    sigma_sq_tensor = torch.exp(2 * current_params['log_sigma'])
+                    # Ensure sigma_sq_tensor is broadcastable to the shape of preds_mean_tensor if log_sigma is scalar
+                    # Since log_sigma is a per-pixel model parameter, sigma_sq_tensor will be scalar.
+                    # We need a (time_pred) array for sigma_sq for this snapshot, filled with this scalar value.
+                    sigma_sq_for_snapshot = sigma_sq_tensor.cpu().numpy() * np.ones(num_times_pred, dtype=np.float32)
+                    pixel_ensemble_sigma_sq_list.append(sigma_sq_for_snapshot)
 
             if pixel_ensemble_predictions_list:
                 # Stack along a new axis (axis 0: snapshots) -> (num_snapshots, time_pred)
-                pixel_ensemble_stack = np.stack(pixel_ensemble_predictions_list, axis=0)
+                pixel_ensemble_means_stack = np.stack(pixel_ensemble_predictions_list, axis=0)
+                pixel_ensemble_sigma_sq_stack = np.stack(pixel_ensemble_sigma_sq_list, axis=0)
                 
-                # Calculate mean and variance across snapshots, handling NaNs
-                atc_predictions_mean[:, r, c] = np.nanmean(pixel_ensemble_stack, axis=0)
-                atc_predictions_variance[:, r, c] = np.nanvar(pixel_ensemble_stack, axis=0)
+                # Calculate mean of means and variance of means
+                mean_of_means = np.nanmean(pixel_ensemble_means_stack, axis=0)
+                variance_of_means = np.nanvar(pixel_ensemble_means_stack, axis=0)
+                
+                # Calculate mean of snapshot variances
+                mean_of_variances = np.nanmean(pixel_ensemble_sigma_sq_stack, axis=0)
+
+                atc_predictions_mean[:, r, c] = mean_of_means
+                atc_predictions_variance[:, r, c] = mean_of_variances + variance_of_means # Law of total variance
             # If list is empty (e.g., all params were NaN), outputs remain NaN
 
     print("Finished ATC prediction from loaded snapshots.")
@@ -469,17 +622,25 @@ if __name__ == '__main__':
     class DummyConfig(config.Config):
         def __init__(self):
             super().__init__() # Initialize base if it has setup
-            self.DEVICE = "cpu" 
+            self.DEVICE = "cpu" # General device
+            self.ATC_DEVICE = "cpu" # Specific for ATC
+            self.GP_DEVICE = "cpu"  # Specific for GP (though not used directly in ATC tests)
             self.ATC_LEARNING_RATE = 0.01
             self.ATC_EPOCHS = 100 # Original: 1000 -> Reduced for faster test
-            self.ATC_ENSEMBLE_SNAPSHOTS = 5 
-            self.ATC_SNAPSHOT_INTERVAL = 10 
+            self.ATC_INIT_SEARCH_TRIALS = 5 # Add search trials for the test
+            self.ATC_INIT_SEARCH_EPOCHS = 10 # Add search epochs for the test
+            self.ATC_ENSEMBLE_SNAPSHOTS = 5
+            self.ATC_SNAPSHOT_INTERVAL = 10
             self.ATC_ENSEMBLE_START_EPOCH = self.ATC_EPOCHS - (self.ATC_ENSEMBLE_SNAPSHOTS * self.ATC_SNAPSHOT_INTERVAL)
             if self.ATC_ENSEMBLE_START_EPOCH < 0: self.ATC_ENSEMBLE_START_EPOCH = 0 
             self.DAYS_OF_YEAR = 365
             self.MIN_CLEAR_OBS_ATC = 10
             self.ATC_N_JOBS = 1 # Test with 1 first for easier debugging of loss collection
             self.ATC_LOSS_LOGGING_INTERVAL = 20 # Log loss every 20 epochs for test
+            self.ATC_WEIGHT_DECAY = 1e-5
+            self.ATC_LR_SCHEDULER_FACTOR = 0.5
+            self.ATC_LR_SCHEDULER_PATIENCE = 5
+            self.ATC_LR_SCHEDULER_MIN_LR = 1e-7
 
     dummy_config = DummyConfig()
     torch.manual_seed(config.RANDOM_SEED if hasattr(config, 'RANDOM_SEED') else 42)
@@ -498,7 +659,7 @@ if __name__ == '__main__':
     lst_stack[:dummy_config.MIN_CLEAR_OBS_ATC+2, 0, 0] = lst_stack_raw_dummy[:dummy_config.MIN_CLEAR_OBS_ATC+2, 0, 0]
     lst_stack[:, 1, 1] = np.nan
     era5_stack_obs[:, 1, 2] = np.nan
-    
+
     # Dummy training_pixel_mask (train all for this simple test)
     training_pixel_mask_dummy = np.ones((height,width), dtype=bool)
     # training_pixel_mask_dummy[0,1] = False # Example of not training one pixel
@@ -560,7 +721,7 @@ if __name__ == '__main__':
             import traceback
             traceback.print_exc()
         # finally: # Keep for inspection for now
-            # os.remove(snapshots_filepath)
+            # os.remove(snapshots_filepath) 
             # print(f"Cleaned up {snapshots_filepath}")
     else:
         print(f"Snapshot file {snapshots_filepath} not found. Skipping prediction phase.")

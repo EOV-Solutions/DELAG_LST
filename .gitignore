@@ -1,4 +1,9 @@
 output/
 Visualized_Bands_KhanhXuan/
 KhanhXuan_BuonMaThuot_DakLak/
+KhanhXuan_BuonMaThuot_DakLak_temp/
+BinhNguyen_KienXuong_ThaiBinh_temp/
+BinhNguyen_KienXuong_ThaiBinh/BinhNguyen_rvi_8days/
+BinhNguyen_KienXuong_ThaiBinh/BinhNguyen_ndvinoncloud/
+output_models/
 __pycache__/

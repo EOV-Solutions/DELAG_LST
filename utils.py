@@ -129,7 +129,7 @@ def align_rasters(reference_raster_path: str, raster_to_align_path: str, output_
                 )
              dst.write(dst_array) # Write all bands at once
 
-    print(f"Aligned {raster_to_align_path} to {reference_raster_path} and saved to {output_aligned_path}")
+    # print(f"Aligned {raster_to_align_path} to {reference_raster_path} and saved to {output_aligned_path}")
 
 def get_day_of_year(dates: np.ndarray) -> np.ndarray:
     """
@@ -337,6 +337,7 @@ def visualize_daily_stacks_comparison(
     lst_observed_stack: np.ndarray, 
     model_predicted_lst_stack: np.ndarray,
     reconstructed_lst_stack: np.ndarray, 
+    era5_stack: np.ndarray, # ADDED: ERA5 stack (time, 2, H, W)
     s2_reflectance_stack: np.ndarray, # (time, bands, H, W)
     ndvi_stack: np.ndarray, # (time, H, W), can be None
     common_dates: list, 
@@ -355,6 +356,7 @@ def visualize_daily_stacks_comparison(
         lst_observed_stack (np.ndarray): (time, H, W) stack of observed LST.
         model_predicted_lst_stack (np.ndarray): (time, H, W) stack of model predicted LST.
         reconstructed_lst_stack (np.ndarray): (time, H, W) stack of reconstructed LST.
+        era5_stack (np.ndarray): (time, 2, H, W) stack of ERA5 data.
         s2_reflectance_stack (np.ndarray): (time, bands, H, W) stack of S2 reflectance.
         ndvi_stack (np.ndarray): (time, H, W) stack of NDVI data, can be None.
         common_dates (list): List of datetime objects corresponding to the time dimension.
@@ -379,14 +381,14 @@ def visualize_daily_stacks_comparison(
         print("No data available to visualize for daily stacks comparison.")
         return
 
-    fig, axes = plt.subplots(4, num_days, figsize=(num_days * 4, 4 * 4), squeeze=False)
+    fig, axes = plt.subplots(6, num_days, figsize=(num_days * 3.5, 6 * 3), squeeze=False) # Changed to 6 rows, adjusted figsize
     # squeeze=False ensures axes is always 2D, even if num_days=1
     
     plot_title_suffix = "S2 RGB"
     if getattr(app_config, 'GP_USE_NDVI_FEATURE', False) and ndvi_stack is not None:
         plot_title_suffix = "NDVI"
 
-    fig.suptitle(f"Daily Comparison for {roi_name} (Observed, Predicted, Reconstructed LST, {plot_title_suffix})", fontsize=16, y=0.99)
+    fig.suptitle(f"Daily Comparison for {roi_name} (Obs, Pred, Recon LST, ERA5 B1, ERA5 B2, {plot_title_suffix})", fontsize=14, y=0.99) # Adjusted title and y
 
     # Determine common min/max for LST plots for consistent color scaling across days
     valid_obs_lst_values = lst_observed_stack[~np.isnan(lst_observed_stack)]
@@ -442,8 +444,30 @@ def visualize_daily_stacks_comparison(
         ax_recon.axis('off')
         if i == 0: ax_recon.set_ylabel("Reconstructed LST", fontsize=12)
 
-        # Row 3: S2 RGB or NDVI
-        ax_s2_or_ndvi = axes[3, i]
+        # Row 3: ERA5 Band 1
+        ax_era1 = axes[3, i]
+        if era5_stack is not None and era5_stack.shape[0] > i and era5_stack.shape[1] > 0:
+            im_era1 = ax_era1.imshow(era5_stack[i, 0, :, :], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+            ax_era1.set_title(f"ERA5 Band 1 (K)")
+        else:
+            ax_era1.text(0.5, 0.5, 'ERA5 B1 N/A', ha='center', va='center')
+            ax_era1.set_title(f"ERA5 Band 1 (K)")
+        ax_era1.axis('off')
+        if i == 0: ax_era1.set_ylabel("ERA5 Band 1", fontsize=12)
+
+        # Row 4: ERA5 Band 2
+        ax_era2 = axes[4, i]
+        if era5_stack is not None and era5_stack.shape[0] > i and era5_stack.shape[1] > 1:
+            im_era2 = ax_era2.imshow(era5_stack[i, 1, :, :], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+            ax_era2.set_title(f"ERA5 Band 2 (K)")
+        else:
+            ax_era2.text(0.5, 0.5, 'ERA5 B2 N/A', ha='center', va='center')
+            ax_era2.set_title(f"ERA5 Band 2 (K)")
+        ax_era2.axis('off')
+        if i == 0: ax_era2.set_ylabel("ERA5 Band 2", fontsize=12)
+
+        # Row 5: S2 RGB or NDVI (original Row 3, now Row 5)
+        ax_s2_or_ndvi = axes[5, i]
         use_ndvi_plot = getattr(app_config, 'GP_USE_NDVI_FEATURE', False)
 
         if use_ndvi_plot and ndvi_stack is not None and ndvi_stack.shape[0] > i:
@@ -462,15 +486,15 @@ def visualize_daily_stacks_comparison(
             ax_s2_or_ndvi.axis('off')
 
         if i == 0:
-            y_label_row3 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
-            ax_s2_or_ndvi.set_ylabel(y_label_row3, fontsize=12)
+            y_label_row5 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
+            ax_s2_or_ndvi.set_ylabel(y_label_row5, fontsize=12)
 
     # Add a single colorbar for LST plots, if desired, or individual ones are fine too.
     # For simplicity, no shared colorbar here. Each plot implicitly shows its scale via vmin/vmax.
     # If a shared colorbar is needed:
     # fig.colorbar(im_recon, ax=axes.ravel().tolist(), shrink=0.6, aspect=30, orientation='horizontal', label='Temperature (K)', pad=0.05)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjust layout for suptitle
+    plt.tight_layout(rect=[0, 0, 1, 0.97]) # Adjust layout for suptitle
 
     viz_output_dir = os.path.join(output_base_dir, "viz")
     os.makedirs(viz_output_dir, exist_ok=True)
@@ -629,159 +653,63 @@ def plot_mean_gp_loss_over_intervals(
     
     plt.close(fig)
 
-def visualize_daily_stacks_comparison(
-    lst_observed_stack: np.ndarray, 
-    model_predicted_lst_stack: np.ndarray,
-    reconstructed_lst_stack: np.ndarray, 
-    s2_reflectance_stack: np.ndarray, # (time, bands, H, W)
-    ndvi_stack: np.ndarray, # (time, H, W), can be None
-    common_dates: list, 
-    output_base_dir: str, # e.g., config.OUTPUT_DIR
-    roi_name: str,
-    app_config: 'config', # Added to access GP_USE_NDVI_FEATURE
-    s2_rgb_indices: tuple = (2, 1, 0), # (R, G, B) assuming B2,B3,B4,B8 -> B4=idx 2, B3=idx 1, B2=idx 0
-    max_days_to_plot: int = 10, # Limit the number of columns for readability
-    lst_contrast_percentiles: tuple = (2, 98) # Percentiles for LST contrast stretching (e.g., 2nd and 98th)
+def plot_input_data_timeseries_overview(
+    doy_stack_numpy: np.ndarray,
+    lst_stack: np.ndarray, # (time, height, width)
+    era5_stack: np.ndarray, # (time, num_era5_bands, height, width)
+    training_pixel_mask: np.ndarray, # (height, width)
+    output_dir: str,
+    roi_name: str
 ):
     """
-    Visualizes a comparison of observed LST, reconstructed LST, and either S2 RGB or NDVI images 
-    across multiple days in a grid plot.
-
-    Args:
-        lst_observed_stack (np.ndarray): (time, H, W) stack of observed LST.
-        model_predicted_lst_stack (np.ndarray): (time, H, W) stack of model predicted LST.
-        reconstructed_lst_stack (np.ndarray): (time, H, W) stack of reconstructed LST.
-        s2_reflectance_stack (np.ndarray): (time, bands, H, W) stack of S2 reflectance.
-        ndvi_stack (np.ndarray): (time, H, W) stack of NDVI data, can be None.
-        common_dates (list): List of datetime objects corresponding to the time dimension.
-        output_base_dir (str): Base output directory (e.g., config.OUTPUT_DIR).
-        roi_name (str): Name of the ROI for filenames and titles.
-        app_config (config): The application configuration object.
-        s2_rgb_indices (tuple): Indices for R, G, B bands in the s2_reflectance_stack's band dimension.
-        max_days_to_plot (int): Maximum number of days (columns) to plot.
-        lst_contrast_percentiles (tuple): Lower and upper percentiles to clip LST data for contrast enhancement.
-                                         Set to (0, 100) or None to use absolute min/max.
+    Plots an overview of the input data timeseries (LST, ERA5 bands)
+    averaged over the spatial domain defined by the training_pixel_mask.
     """
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        print("Matplotlib is not installed. Skipping daily stacks comparison visualization.")
+        print("Matplotlib is not installed. Skipping input data timeseries overview plot.")
         return
 
-    num_available_days = lst_observed_stack.shape[0]
-    num_days = min(num_available_days, max_days_to_plot)
+    if training_pixel_mask is None:
+        print("Warning: training_pixel_mask is None in plot_input_data_timeseries_overview. Plotting average over all pixels.")
+        training_pixel_mask = np.ones((lst_stack.shape[1], lst_stack.shape[2]), dtype=bool)
 
-    if num_days == 0:
-        print("No data available to visualize for daily stacks comparison.")
-        return
-
-    fig, axes = plt.subplots(4, num_days, figsize=(num_days * 4, 4 * 4), squeeze=False)
-    # squeeze=False ensures axes is always 2D, even if num_days=1
+    # Apply training_pixel_mask to LST and ERA5 stacks
+    # We want to calculate mean only over the training pixels.
+    # Create masked versions of the stacks
+    lst_masked = np.where(training_pixel_mask[np.newaxis, :, :], lst_stack, np.nan)
     
-    plot_title_suffix = "S2 RGB"
-    if getattr(app_config, 'GP_USE_NDVI_FEATURE', False) and ndvi_stack is not None:
-        plot_title_suffix = "NDVI"
+    # era5_stack has shape (time, num_era5_bands, height, width)
+    # training_pixel_mask needs to be broadcast correctly: (1, 1, height, width)
+    era5_masked = np.where(training_pixel_mask[np.newaxis, np.newaxis, :, :], era5_stack, np.nan)
 
-    fig.suptitle(f"Daily Comparison for {roi_name} (Observed, Predicted, Reconstructed LST, {plot_title_suffix})", fontsize=16, y=0.99)
-
-    # Determine common min/max for LST plots for consistent color scaling across days
-    valid_obs_lst_values = lst_observed_stack[~np.isnan(lst_observed_stack)]
-    valid_pred_lst_values = model_predicted_lst_stack[~np.isnan(model_predicted_lst_stack)]
-    valid_recon_lst_values = reconstructed_lst_stack[~np.isnan(reconstructed_lst_stack)]
+    # Calculate spatial means, ignoring NaNs
+    mean_lst_timeseries = np.nanmean(lst_masked, axis=(1, 2))
+    mean_era5_band1_timeseries = np.nanmean(era5_masked[:, 0, :, :], axis=(1, 2)) # For band 0
+    mean_era5_band2_timeseries = np.nanmean(era5_masked[:, 1, :, :], axis=(1, 2)) # For band 1
     
-    lst_min_val, lst_max_val = (270, 320) # Default fallback
+    # Ensure the "visualizations" subdirectory exists
+    viz_dir = os.path.join(output_dir, "visualizations")
+    os.makedirs(viz_dir, exist_ok=True)
+    output_filename = os.path.join(viz_dir, f"input_timeseries_overview_{roi_name}.png")
 
-    # Combine all valid LST values for consistent scaling
-    all_valid_lst_for_scaling = []
-    if valid_obs_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_obs_lst_values)
-    if valid_pred_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_pred_lst_values)
-    if valid_recon_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_recon_lst_values)
-
-    if all_valid_lst_for_scaling:
-        combined_lst_values = np.concatenate(all_valid_lst_for_scaling)
-        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
-            p_low, p_high = lst_contrast_percentiles
-            lst_min_val = np.percentile(combined_lst_values, p_low)
-            lst_max_val = np.percentile(combined_lst_values, p_high)
-            print(f"LST visualization (Obs/Pred/Recon): Using percentile ({p_low}%, {p_high}%) scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
-        else:
-            lst_min_val = np.min(combined_lst_values)
-            lst_max_val = np.max(combined_lst_values)
-            print(f"LST visualization (Obs/Pred/Recon): Using absolute min/max scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
+    plt.figure(figsize=(12, 7))
     
-    # Ensure min_val is not greater than max_val after percentile clipping, can happen with near-constant images
-    if lst_min_val >= lst_max_val:
-        lst_min_val = lst_max_val - 1 # Arbitrary small difference to make imshow happy
-        print(f"Warning: LST min_val >= max_val after percentile clip. Adjusted to min={lst_min_val:.2f}, max={lst_max_val:.2f}")
+    plt.plot(doy_stack_numpy, mean_lst_timeseries, marker='o', linestyle='-', label='Mean LST (Training Pixels)')
+    plt.plot(doy_stack_numpy, mean_era5_band1_timeseries, marker='x', linestyle='--', label='Mean ERA5 Band 1 (Training Pixels)')
+    plt.plot(doy_stack_numpy, mean_era5_band2_timeseries, marker='s', linestyle=':', label='Mean ERA5 Band 2 (Training Pixels)')
 
-    for i in range(num_days):
-        date_str = common_dates[i].strftime('%Y-%m-%d')
-        
-        # Row 0: Observed LST
-        ax_obs = axes[0, i]
-        im_obs = ax_obs.imshow(lst_observed_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
-        ax_obs.set_title(f"{date_str}\nObserved LST (K)")
-        ax_obs.axis('off')
-        if i == 0: ax_obs.set_ylabel("Observed LST", fontsize=12)
+    plt.title(f"Input Data Timeseries Overview for {roi_name} (Spatially Averaged over Training Pixels)")
+    plt.xlabel("Day of Year (DOY)")
+    plt.ylabel("Temperature (K) / Value")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
 
-        # Row 1: Model Predicted LST
-        ax_pred = axes[1, i]
-        im_pred = ax_pred.imshow(model_predicted_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
-        ax_pred.set_title(f"Model Predicted LST (K)")
-        ax_pred.axis('off')
-        if i == 0: ax_pred.set_ylabel("Predicted LST", fontsize=12)
-
-        # Row 2: Reconstructed LST
-        ax_recon = axes[2, i]
-        im_recon = ax_recon.imshow(reconstructed_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
-        ax_recon.set_title(f"Reconstructed LST (K)") 
-        ax_recon.axis('off')
-        if i == 0: ax_recon.set_ylabel("Reconstructed LST", fontsize=12)
-
-        # Row 3: S2 RGB or NDVI
-        ax_s2_or_ndvi = axes[3, i]
-        use_ndvi_plot = getattr(app_config, 'GP_USE_NDVI_FEATURE', False)
-
-        if use_ndvi_plot and ndvi_stack is not None and ndvi_stack.shape[0] > i:
-            im_ndvi = ax_s2_or_ndvi.imshow(ndvi_stack[i], cmap='RdYlGn', vmin=-1, vmax=1)
-            ax_s2_or_ndvi.set_title(f"NDVI")
-            ax_s2_or_ndvi.axis('off')
-            # Optional: Add a colorbar for NDVI if desired, though often the range is standard
-            # if i == num_days - 1: # Add colorbar to the last plot
-            #     fig.colorbar(im_ndvi, ax=ax_s2_or_ndvi, orientation='vertical', label='NDVI', fraction=0.046, pad=0.04)
-        elif s2_reflectance_stack is not None and s2_reflectance_stack.shape[0] > i:
-            plot_s2_rgb(s2_reflectance_stack[i], ax_s2_or_ndvi, title=f"S2 RGB", band_indices_rgb=s2_rgb_indices)
-            # plot_s2_rgb already calls axis('off')
-        else:
-            ax_s2_or_ndvi.text(0.5, 0.5, 'Image Data Not Available', horizontalalignment='center', verticalalignment='center')
-            ax_s2_or_ndvi.set_title(f"{plot_title_suffix}")
-            ax_s2_or_ndvi.axis('off')
-
-        if i == 0:
-            y_label_row3 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
-            ax_s2_or_ndvi.set_ylabel(y_label_row3, fontsize=12)
-
-    # Add a single colorbar for LST plots, if desired, or individual ones are fine too.
-    # For simplicity, no shared colorbar here. Each plot implicitly shows its scale via vmin/vmax.
-    # If a shared colorbar is needed:
-    # fig.colorbar(im_recon, ax=axes.ravel().tolist(), shrink=0.6, aspect=30, orientation='horizontal', label='Temperature (K)', pad=0.05)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjust layout for suptitle
-
-    viz_output_dir = os.path.join(output_base_dir, "viz")
-    os.makedirs(viz_output_dir, exist_ok=True)
-    filename = os.path.join(viz_output_dir, f"daily_comparison_{roi_name}.jpg")
-    
     try:
-        plt.savefig(filename, dpi=150, format='jpg', quality=90)
-        print(f"Saved daily comparison visualization to {filename}")
+        plt.savefig(output_filename)
+        print(f"Input data timeseries overview plot saved to {output_filename}")
     except Exception as e:
-        print(f"Error saving daily comparison plot as JPG: {e}. Trying PNG...")
-        try:
-            png_filename = os.path.join(viz_output_dir, f"daily_comparison_{roi_name}.png")
-            plt.savefig(png_filename, dpi=150, format='png')
-            print(f"Saved daily comparison visualization to {png_filename}")
-        except Exception as ep:
-            print(f"Error saving daily comparison plot as PNG: {ep}")
-            
-    plt.close(fig) # Close the figure to free memory 
+        print(f"Error saving input data timeseries overview plot: {e}")
+    plt.close()

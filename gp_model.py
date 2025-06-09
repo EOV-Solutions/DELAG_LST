@@ -9,6 +9,7 @@ from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 import warnings # Import the standard warnings module
 import os # Import os module for file operations
+from typing import Optional, List
 
 import config # Assuming your config.py is accessible
 
@@ -75,7 +76,7 @@ def _train_gp_model_internal( # Renamed to internal, takes inducing_points
             - Trained likelihood.
             - List of mean losses for each logging interval.
     """
-    device = torch.device(app_config.DEVICE if torch.cuda.is_available() else "cpu")
+    device = torch.device(app_config.GP_DEVICE if torch.cuda.is_available() else "cpu")
     train_x, train_y = train_x.to(device), train_y.to(device)
     inducing_points = inducing_points.to(device) # Ensure inducing points are on the correct device
 
@@ -205,7 +206,7 @@ def load_gp_model(filepath: str, app_config: 'config') -> tuple[ApproximateGPMod
             - Loaded and initialized GP model.
             - Loaded and initialized likelihood.
     """
-    device = torch.device(app_config.DEVICE if torch.cuda.is_available() else "cpu")
+    device = torch.device(app_config.GP_DEVICE if torch.cuda.is_available() else "cpu")
     
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"GP model file not found at {filepath}")
@@ -223,7 +224,7 @@ def load_gp_model(filepath: str, app_config: 'config') -> tuple[ApproximateGPMod
     print(f"GP model, likelihood, and inducing points loaded from {filepath}")
     return model, likelihood
 
-def load_gp_interval_losses(model_filepath: str) -> list[float] | None:
+def load_gp_interval_losses(model_filepath: str) -> Optional[List[float]]:
     """
     Loads GP interval losses if the corresponding _interval_losses.npy file exists.
 
@@ -231,7 +232,7 @@ def load_gp_interval_losses(model_filepath: str) -> list[float] | None:
         model_filepath (str): Path to the primary GP model .pth file.
 
     Returns:
-        list[float] | None: List of losses, or None if file not found or error occurs.
+        Optional[List[float]]: List of losses, or None if file not found or error occurs.
     """
     loss_filepath = model_filepath.replace('.pth', '_interval_losses.npy')
     if os.path.exists(loss_filepath):
@@ -268,7 +269,7 @@ def predict_gp_residuals(
             - gp_mean_flat (np.ndarray): Predicted mean of residuals (num_total_observations,).
             - gp_variance_flat (np.ndarray): Predicted variance of residuals (num_total_observations,).
     """
-    device = torch.device(app_config.DEVICE if torch.cuda.is_available() else "cpu")
+    device = torch.device(app_config.GP_DEVICE if torch.cuda.is_available() else "cpu")
     model.eval()
     likelihood.eval()
 
@@ -484,7 +485,7 @@ def load_and_predict_gp_residuals(preprocessed_data: dict, atc_predictions: np.n
     _, _, features_all_pixel_time_flat, original_dims, _ = prepare_gp_training_data(
         preprocessed_data, atc_predictions, app_config
     )
-    
+
     gp_model_load_path = os.path.join(app_config.MODEL_WEIGHTS_PATH, app_config.GP_MODEL_WEIGHT_FILENAME)
     
     if not os.path.exists(gp_model_load_path):
@@ -518,7 +519,9 @@ if __name__ == '__main__':
         def __init__(self):
             super().__init__() # Ensure base class init is called if it does anything
             # Override specific settings for the test if needed
-            self.DEVICE = "cpu"
+            self.DEVICE = "cpu" # General device setting
+            self.ATC_DEVICE = "cpu" # Specific for ATC (not used directly in GP tests)
+            self.GP_DEVICE = "cpu"  # Specific for GP
             self.GP_NUM_INDUCING_POINTS = 64 # Smaller for faster test
             self.GP_EPOCHS_INITIAL = 3 # Minimal epochs for test
             self.GP_EPOCHS_FINAL = 2   # Minimal epochs for test
@@ -541,6 +544,8 @@ if __name__ == '__main__':
     class DummyConfigTemporalMeanS2(DummyConfig):
         def __init__(self):
             super().__init__()
+            self.GP_DEVICE = "cpu" # Ensure GP_DEVICE is set, can be overridden by specific tests
+            self.ATC_DEVICE = "cpu" # Ensure ATC_DEVICE is set
             self.GP_USE_TEMPORAL_MEAN_S2_FEATURES = True
             self.GP_USE_NDVI_FEATURE = False
             self.GP_LOSS_LOGGING_INTERVAL = 2 # Override for test
@@ -551,6 +556,8 @@ if __name__ == '__main__':
     class DummyConfigNDVI(DummyConfig):
         def __init__(self):
             super().__init__()
+            self.GP_DEVICE = "cpu" # Ensure GP_DEVICE is set
+            self.ATC_DEVICE = "cpu" # Ensure ATC_DEVICE is set
             self.GP_USE_TEMPORAL_MEAN_S2_FEATURES = False # Ensure this is False if NDVI is primary
             self.GP_USE_NDVI_FEATURE = True
             self.GP_LOSS_LOGGING_INTERVAL = 2 # Override for test

@@ -159,7 +159,7 @@ def process_s2_images(s2_folder_path):
 
 if __name__ == "__main__":
     # Define the path to the ROI folder
-    roi_base_path = "DELAG_LST/KhanhXuan_BuonMaThuot_DakLak/" 
+    roi_base_path = "DELAG_LST/BinhNguyen_KienXuong_ThaiBinh" 
     
     # ---- Process LST Data ----
     lst_data_folder = os.path.join(roi_base_path, "lst")
@@ -175,9 +175,9 @@ if __name__ == "__main__":
     else:
         process_era5_images(era5_data_folder)
 
-    # ---- Process S2 Data ----
-    s2_data_folder = os.path.join(roi_base_path, "s2_images")
-    if not os.path.isdir(s2_data_folder):
-        print(f"Error: S2 folder not found at {s2_data_folder}")
-    else:
-        process_s2_images(s2_data_folder)
+    # # ---- Process S2 Data ----
+    # s2_data_folder = os.path.join(roi_base_path, "s2_images")
+    # if not os.path.isdir(s2_data_folder):
+    #     print(f"Error: S2 folder not found at {s2_data_folder}")
+    # else:
+    #     process_s2_images(s2_data_folder)

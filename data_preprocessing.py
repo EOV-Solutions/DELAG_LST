@@ -215,9 +215,11 @@ def load_era5_skin_temp(
     # Get target H, W from ref grid
     with rasterio.open(reference_grid_path) as ref_src:
         target_height, target_width = ref_src.height, ref_src.width
+        # Number of ERA5 bands to read (e.g., temp and dewpoint)
+        n_bands = 2
 
-    # Initialize the full stack with NaNs
-    era5_stack_full = np.full((len(target_dates), target_height, target_width), np.nan, dtype=np.float32)
+    # Initialize the full stack with NaNs for two bands
+    era5_stack_full = np.full((len(target_dates), n_bands, target_height, target_width), np.nan, dtype=np.float32)
     
     all_era5_files_in_dir = sorted(glob.glob(os.path.join(era5_skin_temp_dir, "*.tif")) + glob.glob(os.path.join(era5_skin_temp_dir, "*.img")))
     file_date_mapping_era5 = {}
@@ -249,20 +251,14 @@ def load_era5_skin_temp(
             utils.align_rasters(reference_grid_path, era5_fpath, temp_aligned_era5_path, 
                                 resampling_method=RasterioResampling.nearest) # Nearest for ERA5 is often preferred
             with rasterio.open(temp_aligned_era5_path) as src:
-                # ERA5 data often has 2 bands (e.g. temp, dewpoint), or just 1 (temp)
-                # Assuming config specifies which band or if it's always band 1 (index 0) or band 2 (index 1)
-                # For now, let's assume band 2 (index 1) as in original code, check if src.count allows this
-                band_to_read = 1 # Default to the second band (1-indexed for rasterio.read)
-                if src.count < band_to_read:
-                    print(f"Warning: ERA5 file {era5_fpath} has only {src.count} band(s). Reading band 1.")
-                    band_to_read = 1 # Fallback to first band
-                
-                era5_data_slice = src.read(band_to_read).astype(np.float32)
-                # Convert known nodata values in source file to NaN if applicable
-                # Example: if app_config.ERA5_NODATA_VALUE is defined and not np.nan:
-                # if hasattr(app_config, 'ERA5_NODATA_VALUE') and not np.isnan(app_config.ERA5_NODATA_VALUE):
-                #     era5_data_slice[era5_data_slice == app_config.ERA5_NODATA_VALUE] = np.nan
-                era5_stack_full[i, :, :] = era5_data_slice
+                # Read first two bands if available, else duplicate band 1
+                if src.count >= 2:
+                    era5_data_multiband = src.read([1, 2]).astype(np.float32)  # shape (2, H, W)
+                else:
+                    band1 = src.read(1).astype(np.float32)
+                    era5_data_multiband = np.stack([band1, band1], axis=0)
+                # Assign to stack: (time, band, row, col)
+                era5_stack_full[i, :, :, :] = era5_data_multiband
             os.remove(temp_aligned_era5_path)
         except Exception as e:
             print(f"Error aligning ERA5 file {era5_fpath} for date {date_dt.strftime('%Y-%m-%d')}: {e}. Leaving NaNs for this date.")
@@ -276,56 +272,44 @@ def load_era5_skin_temp(
 
     # Temporal Interpolation (Linear)
     print("Performing temporal linear interpolation on ERA5 stack...")
-    for r in tqdm(range(target_height), desc="ERA5 Temporal Interpolation (Rows)", leave=False):
-        for c in range(target_width):
-            pixel_series = pd.Series(era5_stack_full[:, r, c])
-            era5_stack_full[:, r, c] = pixel_series.interpolate(method='linear', limit_direction='both').to_numpy()
+    for b in range(n_bands):
+        for r in tqdm(range(target_height), desc=f"ERA5 Temporal Interpolation (Band {b+1})", leave=False):
+            for c in range(target_width):
+                series = pd.Series(era5_stack_full[:, b, r, c])
+                era5_stack_full[:, b, r, c] = series.interpolate(method='linear', limit_direction='both').to_numpy()
 
     # Spatial Interpolation (Linear using griddata) for remaining NaNs
     print("Performing spatial linear interpolation on ERA5 stack for remaining NaNs...")
     from scipy.interpolate import griddata
     points = None # To be initialized once
     for t in tqdm(range(len(target_dates)), desc="ERA5 Spatial Interpolation (Time Slices)", leave=False):
-        slice_data = era5_stack_full[t, :, :]
-        if np.isnan(slice_data).any():
-            if points is None:
-                # Create a grid of coordinates for interpolation, once
-                x_coords, y_coords = np.meshgrid(np.arange(target_width), np.arange(target_height))
-                points = np.vstack((x_coords.ravel(), y_coords.ravel())).T
-            
-            valid_mask = ~np.isnan(slice_data)
-            values = slice_data[valid_mask]
-            points_with_values = points[valid_mask.ravel()]
-            
-            if points_with_values.shape[0] < 3: # Not enough points for linear/cubic interpolation
-                # print(f"Warning: Too few valid points ({points_with_values.shape[0]}) in ERA5 slice {t} for spatial interpolation. Using nearest if any, else NaNs remain.")
-                if points_with_values.shape[0] > 0: # Fill with nearest if at least one point
-                    nan_locations = np.where(np.isnan(slice_data))
-                    interpolated_slice_nearest = griddata(points_with_values, values, (nan_locations[1], nan_locations[0]), method='nearest')
-                    if interpolated_slice_nearest.ndim > 0 : # Check if griddata returned usable values
-                         slice_data[nan_locations] = interpolated_slice_nearest
-                # else: all NaNs, will remain NaNs, which is fine
-                era5_stack_full[t, :, :] = slice_data # Update stack
-                continue
-
-            nan_locations = np.where(np.isnan(slice_data))
-            grid_x_nan, grid_y_nan = nan_locations[1], nan_locations[0] # griddata expects (x,y) for points_to_interpolate
-            
-            try:
-                interpolated_values = griddata(points_with_values, values, (grid_x_nan, grid_y_nan), method='linear')
-                # Fill only if interpolated_values is not all NaNs (can happen if all points are collinear etc for linear)
-                if not np.all(np.isnan(interpolated_values)):
-                     slice_data[np.isnan(slice_data)] = interpolated_values # Fill NaNs where interpolation succeeded
-            except Exception as e_spatial_lin:
-                # print(f"    S2 spatial linear griddata failed (t={t}, b={b}): {e_spatial_lin}. Trying nearest.")
+        for b in range(n_bands):
+            slice_data = era5_stack_full[t, b, :, :]
+            if np.isnan(slice_data).any():
+                if points is None:
+                    x_coords, y_coords = np.meshgrid(np.arange(target_width), np.arange(target_height))
+                    points = np.vstack((x_coords.ravel(), y_coords.ravel())).T
+                valid_mask = ~np.isnan(slice_data)
+                values = slice_data[valid_mask]
+                points_with_values = points[valid_mask.ravel()]
+                if points_with_values.shape[0] < 3:
+                    if points_with_values.shape[0] > 0:
+                        nan_locs = np.where(np.isnan(slice_data))
+                        nearest = griddata(points_with_values, values, (nan_locs[1], nan_locs[0]), method='nearest')
+                        slice_data[nan_locs] = nearest
+                    era5_stack_full[t, b, :, :] = slice_data
+                    continue
+                nan_locs = np.where(np.isnan(slice_data))
+                grid_x, grid_y = nan_locs[1], nan_locs[0]
                 try:
-                    interpolated_values_nearest = griddata(points_with_values, values, (grid_x_nan, grid_y_nan), method='nearest')
-                    if not np.all(np.isnan(interpolated_values_nearest)):
-                        slice_data[np.isnan(slice_data)] = interpolated_values_nearest
-                except Exception as e_spatial_near:
-                    print(f"    S2 spatial nearest griddata also failed for ERA5 slice {t}: {e_spatial_near}")
-            
-            era5_stack_full[t, :, :] = slice_data # Update the stack with the (partially) interpolated slice
+                    interp_vals = griddata(points_with_values, values, (grid_x, grid_y), method='linear')
+                    if not np.all(np.isnan(interp_vals)):
+                        slice_data[np.isnan(slice_data)] = interp_vals
+                except Exception:
+                    interp_vals_nearest = griddata(points_with_values, values, (grid_x, grid_y), method='nearest')
+                    if not np.all(np.isnan(interp_vals_nearest)):
+                        slice_data[np.isnan(slice_data)] = interp_vals_nearest
+                era5_stack_full[t, b, :, :] = slice_data
 
     if np.isnan(era5_stack_full).any():
         print(f"Warning: {np.isnan(era5_stack_full).sum()} NaNs still present in ERA5 stack after all interpolation attempts.")

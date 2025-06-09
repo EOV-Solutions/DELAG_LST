@@ -3,13 +3,14 @@ Configuration file for the DELAG project.
 """
 import os
 import numpy as np
+import datetime
 
 # --- User Defined Paths for a Single ROI --- 
 # Base directory containing all ROI folders
 BASE_DATA_DIR = "/mnt/hdd12tb/code/nhatvm/DELAG/DELAG_LST" # USER TO VERIFY/SET THIS
 
 # Name of the specific ROI folder to process from BASE_DATA_DIR
-ROI_NAME = "KhanhXuan_BuonMaThuot_DakLak" # USER TO SET THIS to one of the subfolders
+ROI_NAME = "BinhNguyen_KienXuong_ThaiBinh" # USER TO SET THIS to one of the subfolders
 
 # Construct full paths for the selected ROI
 ROI_BASE_PATH = os.path.join(BASE_DATA_DIR, ROI_NAME)
@@ -28,7 +29,8 @@ NDVI_INFER_PATH = os.path.join(ROI_BASE_PATH, NDVI_INFER_SUBDIR)
 # --- Output Paths ---
 # It might be good to include ROI_NAME in the output directory structure too
 OUTPUT_DIR_BASE = "output/"
-OUTPUT_DIR = os.path.join(OUTPUT_DIR_BASE, ROI_NAME)
+CURRENT_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_DIR = os.path.join(OUTPUT_DIR_BASE, f"{ROI_NAME}_{CURRENT_TIMESTAMP}")
 RECONSTRUCTED_LST_PATH = os.path.join(OUTPUT_DIR, "reconstructed_lst/")
 UNCERTAINTY_MAPS_PATH = os.path.join(OUTPUT_DIR, "uncertainty_maps/")
 EVALUATION_RESULTS_PATH = "evaluation_results.json" # This will be saved inside the ROI-specific OUTPUT_DIR
@@ -52,16 +54,20 @@ GP_USE_NDVI_FEATURE = True # Set to True to use NDVI as a feature instead of S2 
 # S2_NIR_INDEX = 3  # Example: Corresponds to the 4th band (NIR)
 
 # --- Spatial Sampling for Training ---
-SPATIAL_TRAINING_SAMPLE_PERCENTAGE = 1.0  # Fraction of pixels to use for training (1.0 = all pixels)
+SPATIAL_TRAINING_SAMPLE_PERCENTAGE = 1 # Fraction of pixels to use for training (1.0 = all pixels)
 MIN_PIXELS_FOR_SPATIAL_SAMPLING = 100     # Minimum number of pixels if SPATIAL_TRAINING_SAMPLE_PERCENTAGE < 1.0
 
 # --- ATC Model Hyperparameters ---
-ATC_LEARNING_RATE = 0.001
-ATC_EPOCHS = 1200
+ATC_LEARNING_RATE = 0.0001
+ATC_EPOCHS = 1000
+ATC_WEIGHT_DECAY = 1e-5  # L2 regularization strength
+ATC_LR_SCHEDULER_PATIENCE = 15 # Patience for ReduceLROnPlateau
+ATC_LR_SCHEDULER_FACTOR = 0.1   # Factor for ReduceLROnPlateau
+ATC_LR_SCHEDULER_MIN_LR = 1e-6  # Minimum LR for ReduceLROnPlateau
 ATC_ENSEMBLE_SNAPSHOTS = 200
 ATC_SNAPSHOT_INTERVAL = 4 # Save every 4 epochs
 ATC_ENSEMBLE_START_EPOCH = ATC_EPOCHS - (ATC_ENSEMBLE_SNAPSHOTS * ATC_SNAPSHOT_INTERVAL)
-MIN_CLEAR_OBS_ATC = 20 # Minimum number of clear sky observations to train an ATC model for a pixel
+MIN_CLEAR_OBS_ATC = 30 # Minimum number of clear sky observations to train an ATC model for a pixel
 ATC_N_JOBS = 32  # Use all available CPU cores for ATC training. Set to 1 for no parallelization, or a specific number e.g., 4.
 ATC_LOSS_LOGGING_INTERVAL = 100 # Log loss every N epochs for map generation
 
@@ -69,9 +75,9 @@ ATC_LOSS_LOGGING_INTERVAL = 100 # Log loss every N epochs for map generation
 # S2 bands will be annual/period means: Red, Green, Blue, NIR
 GP_RESIDUAL_FEATURES = ['s2_red_mean', 's2_green_mean', 's2_blue_mean', 's2_nir_mean', 'norm_x', 'norm_y']
 GP_LEARNING_RATE_INITIAL = 0.05
-GP_EPOCHS_INITIAL = 100
+GP_EPOCHS_INITIAL = 50
 GP_LEARNING_RATE_FINAL = 0.005
-GP_EPOCHS_FINAL = 50
+GP_EPOCHS_FINAL = 20
 GP_MINI_BATCH_SIZE = 1024
 GP_NUM_INDUCING_POINTS = 512
 GP_LOSS_LOGGING_INTERVAL = 10 # Log GP loss every N epochs for plot
@@ -79,10 +85,13 @@ GP_LOSS_LOGGING_INTERVAL = 10 # Log GP loss every N epochs for plot
 # --- Evaluation Parameters ---
 EVAL_HOLDOUT_PERCENTAGE = 0.20 # For heavily cloudy scenario
 # EVAL_SIMULATED_CLOUD_COVER_PERCENTAGE = [0.1, 0.3, 0.5, 0.7, 0.9] # Retained if needed
+MAX_DAYS_FOR_DAILY_VISUALIZATION_PLOT = 10 # Max days for the daily comparison plot
 
 # --- General ---
 RANDOM_SEED = 42
-DEVICE = "cpu" # "cuda" if GPU is available, else "cpu" 
+DEVICE = "cpu" # General default device, "cuda" if GPU is available, else "cpu". ATC and GP models will use specific settings below.
+ATC_DEVICE = "cpu"  # Device for ATC model: "cuda" or "cpu"
+GP_DEVICE = "cuda"   # Device for GP model: "cuda" or "cpu"
 
-MODEL_WEIGHTS_PATH = "/mnt/hdd12tb/code/nhatvm/DELAG/DELAG_LST/output/model_weights_directory_temp/"+ROI_NAME # Or any other appropriate path 
+MODEL_WEIGHTS_PATH = os.path.join(BASE_DATA_DIR, "output_models", f"{ROI_NAME}_{CURRENT_TIMESTAMP}")
 GP_MODEL_WEIGHT_FILENAME = "gp_model_and_likelihood.pth" # Filename for saved GP model 
