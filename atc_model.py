@@ -28,8 +28,6 @@ class EnhancedATCModel(nn.Module):
         self.A = nn.Parameter(torch.tensor(initial_params.get('A', 10.0) if initial_params else 10.0))   # Amplitude in Kelvin
         self.phi = nn.Parameter(torch.tensor(initial_params.get('phi', 180.0) if initial_params else 180.0)) # Phase shift in days
         self.b = nn.Parameter(torch.tensor(initial_params.get('b', 0.5) if initial_params else 0.5))     # ERA5 coefficient
-        # New parameter for log standard deviation of observation noise
-        self.log_sigma = nn.Parameter(torch.tensor(initial_params.get('log_sigma', 0.0) if initial_params else 0.0)) # log(sigma), so sigma starts at exp(0)=1
         
         self.days_in_year = config.DAYS_OF_YEAR # From config file
 
@@ -74,6 +72,7 @@ def train_atc_model_pixelwise(
             - A list of mean losses for each logging interval over the total epochs.
     """
     device = torch.device(app_config.ATC_DEVICE if torch.cuda.is_available() else "cpu")
+    loss_fn = nn.MSELoss()
 
     # Convert inputs to tensors
     lst_tensor = torch.from_numpy(pixel_lst_clear).float().to(device)
@@ -82,8 +81,8 @@ def train_atc_model_pixelwise(
     era5_tensor_1 = torch.from_numpy(pixel_era5_clear[:, 0]).float().to(device)
 
     # --- Phase 1: Search for best initial parameters ---
-    init_search_trials = getattr(app_config, 'ATC_INIT_SEARCH_TRIALS', 200)
-    init_search_epochs = getattr(app_config, 'ATC_INIT_SEARCH_EPOCHS', 200)
+    init_search_trials = getattr(app_config, 'ATC_INIT_SEARCH_TRIALS', 20)
+    init_search_epochs = getattr(app_config, 'ATC_INIT_SEARCH_EPOCHS', 40)
     # print(f"ATC_INIT_SEARCH_TRIALS: {init_search_trials}, ATC_INIT_SEARCH_EPOCHS: {init_search_epochs}")
     
     best_initial_params = None
@@ -105,7 +104,6 @@ def train_atc_model_pixelwise(
             'A': initial_A_base_val * np.random.rand()/2,
             'phi': initial_phi_base * np.random.rand()/2,
             'b': initial_b_base * np.random.rand()/2,
-            'log_sigma': 0.0 # Not randomized
         }
         
         # Short training for this trial
@@ -117,12 +115,8 @@ def train_atc_model_pixelwise(
             atc_model_trial.train()
             optimizer_trial.zero_grad()
             
-            predictions_mean = atc_model_trial(doy_tensor, era5_tensor_1)
-            
-            log_sigma_val = atc_model_trial.log_sigma
-            variance = torch.exp(2 * log_sigma_val).clamp(min=1e-6)
-            nll_terms = 0.5 * torch.log(2 * np.pi * variance) + 0.5 * ((lst_tensor - predictions_mean).pow(2) / variance)
-            loss = torch.mean(nll_terms)
+            predictions = atc_model_trial(doy_tensor, era5_tensor_1)
+            loss = loss_fn(predictions, lst_tensor)
             
             if torch.isnan(loss).any() or torch.isinf(loss).any():
                 trial_final_loss = float('inf')
@@ -143,7 +137,6 @@ def train_atc_model_pixelwise(
             'A': initial_A_base_val,
             'phi': initial_phi_base,
             'b': initial_b_base,
-            'log_sigma': 0.0
         }
 
     # --- Phase 2: Full training with best initial parameters ---
@@ -183,15 +176,9 @@ def train_atc_model_pixelwise(
         atc_model.train()
         optimizer.zero_grad()
         
-        predictions_mean = atc_model(doy_tensor, era5_tensor_1)
+        predictions = atc_model(doy_tensor, era5_tensor_1)
         
-        # Calculate Gaussian Negative Log-Likelihood
-        log_sigma_val = atc_model.log_sigma
-        variance = torch.exp(2 * log_sigma_val).clamp(min=1e-6) 
-
-        nll_terms = 0.5 * torch.log(2 * np.pi * variance) + \
-                    0.5 * ((lst_tensor - predictions_mean).pow(2) / variance)
-        loss = torch.mean(nll_terms)
+        loss = loss_fn(predictions, lst_tensor)
         
         loss.backward()
         if torch.isnan(loss).any() or torch.isinf(loss).any(): # Added check for inf loss
@@ -308,7 +295,6 @@ def _train_pixel_atc_worker(
         default_params_for_snapshot = {
             'C': torch.tensor(default_initial_C), 'A': torch.tensor(default_initial_A),
             'phi': torch.tensor(180.0), 'b': torch.tensor(0.5),
-            'log_sigma': torch.tensor(0.0) # Default log_sigma = 0 (sigma=1K)
         }
         num_needed_snapshots = app_config.ATC_ENSEMBLE_SNAPSHOTS
         while len(model_snapshots) < num_needed_snapshots:
@@ -429,7 +415,6 @@ def save_atc_snapshots(all_pixel_snapshots: dict, filepath: str, image_height: i
     A_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
     phi_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
     b_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
-    log_sigma_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
 
     print(f"Structuring snapshots for saving. Expected snapshots per pixel: {num_snapshots_expected}")
     
@@ -451,15 +436,13 @@ def save_atc_snapshots(all_pixel_snapshots: dict, filepath: str, image_height: i
             A_stack[idx, r, c] = state_dict.get('A', np.nan) if torch.is_tensor(state_dict.get('A', np.nan)) else float(state_dict.get('A', np.nan))
             phi_stack[idx, r, c] = state_dict.get('phi', np.nan) if torch.is_tensor(state_dict.get('phi', np.nan)) else float(state_dict.get('phi', np.nan))
             b_stack[idx, r, c] = state_dict.get('b', np.nan) if torch.is_tensor(state_dict.get('b', np.nan)) else float(state_dict.get('b', np.nan))
-            log_sigma_stack[idx, r, c] = state_dict.get('log_sigma', np.nan) if torch.is_tensor(state_dict.get('log_sigma', np.nan)) else float(state_dict.get('log_sigma', np.nan))
 
     print(f"Saving snapshot stacks to {filepath}...")
     np.savez_compressed(filepath, 
                         C_snapshots=C_stack, 
                         A_snapshots=A_stack, 
                         phi_snapshots=phi_stack, 
-                        b_snapshots=b_stack,
-                        log_sigma_snapshots=log_sigma_stack)
+                        b_snapshots=b_stack)
     print(f"Snapshots saved successfully.")
 
 def load_atc_snapshots(filepath: str) -> dict:
@@ -470,7 +453,7 @@ def load_atc_snapshots(filepath: str) -> dict:
         filepath (str): Path to the .npz file.
 
     Returns:
-        dict: A dictionary with keys 'C_snapshots', 'A_snapshots', 'phi_snapshots', 'b_snapshots', 'log_sigma_snapshots',
+        dict: A dictionary with keys 'C_snapshots', 'A_snapshots', 'phi_snapshots', 'b_snapshots',
               each mapping to a NumPy array of shape (num_snapshots, height, width).
     """
     print(f"Loading snapshots from {filepath}...")
@@ -483,7 +466,6 @@ def load_atc_snapshots(filepath: str) -> dict:
         "A_snapshots": data.get('A_snapshots'),
         "phi_snapshots": data.get('phi_snapshots'),
         "b_snapshots": data.get('b_snapshots'),
-        "log_sigma_snapshots": data.get('log_sigma_snapshots')
     }
     # It would be good to save/load ATC_MODEL_TYPE with the snapshots.
     # For now, prediction function assumes ATC or needs modification for MLP.
@@ -507,13 +489,12 @@ def predict_atc_from_loaded_snapshots(
     Returns:
         tuple[np.ndarray, np.ndarray]:
             - atc_predictions_mean (np.ndarray): Mean ATC predictions (time_pred, height, width).
-            - atc_predictions_variance (np.ndarray): Variance of ATC predictions (time_pred, height, width).
+            - atc_predictions_variance (np.ndarray): Ensemble variance of ATC predictions (time_pred, height, width).
     """
     C_snaps = loaded_snapshots_data['C_snapshots'] # (num_snaps, height, width)
     A_snaps = loaded_snapshots_data['A_snapshots']
     phi_snaps = loaded_snapshots_data['phi_snapshots']
     b_snaps = loaded_snapshots_data['b_snapshots']
-    log_sigma_snaps = loaded_snapshots_data['log_sigma_snapshots']
 
     num_snapshots, height, width = C_snaps.shape
     num_times_pred = len(doy_for_prediction_numpy)
@@ -533,7 +514,7 @@ def predict_atc_from_loaded_snapshots(
 
     # Create a single model instance to reuse
     # Initialize with dummy params, will be overwritten by loaded snapshots
-    temp_model_initial_params = {'C':0.0,'A':0.0,'phi':0.0,'b':0.0,'log_sigma':0.0}
+    temp_model_initial_params = {'C':0.0,'A':0.0,'phi':0.0,'b':0.0}
     temp_model = EnhancedATCModel(initial_params=temp_model_initial_params).to(device)
     temp_model.eval() # Set to evaluation mode
 
@@ -550,7 +531,6 @@ def predict_atc_from_loaded_snapshots(
                 continue
 
             pixel_ensemble_predictions_list = [] # List to hold (time_pred) arrays for mean predictions
-            pixel_ensemble_sigma_sq_list = []  # List to hold (time_pred) arrays for sigma_sq from each snapshot
 
             for snap_idx in range(num_snapshots):
                 # Load parameters for the current snapshot and pixel
@@ -558,14 +538,12 @@ def predict_atc_from_loaded_snapshots(
                 current_A = A_snaps[snap_idx, r, c]
                 current_phi = phi_snaps[snap_idx, r, c]
                 current_b = b_snaps[snap_idx, r, c]
-                current_log_sigma = log_sigma_snaps[snap_idx, r, c]
 
                 current_params = {
                     'C': torch.tensor(current_C, device=device),
                     'A': torch.tensor(current_A, device=device),
                     'phi': torch.tensor(current_phi, device=device),
                     'b': torch.tensor(current_b, device=device),
-                    'log_sigma': torch.tensor(current_log_sigma, device=device)
                 }
                 
                 # Check if any parameter for this specific snapshot is NaN. If so, this snapshot can't predict.
@@ -573,39 +551,26 @@ def predict_atc_from_loaded_snapshots(
                     # This snapshot's prediction will be all NaNs for this pixel
                     nan_preds_for_snapshot = np.full(num_times_pred, np.nan, dtype=np.float32)
                     pixel_ensemble_predictions_list.append(nan_preds_for_snapshot)
-                    pixel_ensemble_sigma_sq_list.append(nan_preds_for_snapshot) # Also append NaNs for sigma_sq
                     continue
 
                 temp_model.load_state_dict(current_params)
                 
                 with torch.no_grad():
                     # Model forward now only returns the mean prediction
-                    preds_mean_tensor = temp_model(doy_for_prediction_tensor, pixel_era5_pred_tensor1)
-                    pixel_ensemble_predictions_list.append(preds_mean_tensor.cpu().numpy()) # Store (time_pred)
+                    preds_tensor = temp_model(doy_for_prediction_tensor, pixel_era5_pred_tensor1)
+                    pixel_ensemble_predictions_list.append(preds_tensor.cpu().numpy()) # Store (time_pred)
                     
-                    # Calculate sigma_sq from the loaded log_sigma for this snapshot
-                    # current_params['log_sigma'] is a tensor here
-                    sigma_sq_tensor = torch.exp(2 * current_params['log_sigma'])
-                    # Ensure sigma_sq_tensor is broadcastable to the shape of preds_mean_tensor if log_sigma is scalar
-                    # Since log_sigma is a per-pixel model parameter, sigma_sq_tensor will be scalar.
-                    # We need a (time_pred) array for sigma_sq for this snapshot, filled with this scalar value.
-                    sigma_sq_for_snapshot = sigma_sq_tensor.cpu().numpy() * np.ones(num_times_pred, dtype=np.float32)
-                    pixel_ensemble_sigma_sq_list.append(sigma_sq_for_snapshot)
 
             if pixel_ensemble_predictions_list:
                 # Stack along a new axis (axis 0: snapshots) -> (num_snapshots, time_pred)
-                pixel_ensemble_means_stack = np.stack(pixel_ensemble_predictions_list, axis=0)
-                pixel_ensemble_sigma_sq_stack = np.stack(pixel_ensemble_sigma_sq_list, axis=0)
+                pixel_ensemble_preds_stack = np.stack(pixel_ensemble_predictions_list, axis=0)
                 
-                # Calculate mean of means and variance of means
-                mean_of_means = np.nanmean(pixel_ensemble_means_stack, axis=0)
-                variance_of_means = np.nanvar(pixel_ensemble_means_stack, axis=0)
+                # Calculate mean of predictions and variance of predictions (ensemble uncertainty)
+                mean_of_predictions = np.nanmean(pixel_ensemble_preds_stack, axis=0)
+                variance_of_predictions = np.nanvar(pixel_ensemble_preds_stack, axis=0)
                 
-                # Calculate mean of snapshot variances
-                mean_of_variances = np.nanmean(pixel_ensemble_sigma_sq_stack, axis=0)
-
-                atc_predictions_mean[:, r, c] = mean_of_means
-                atc_predictions_variance[:, r, c] = mean_of_variances + variance_of_means # Law of total variance
+                atc_predictions_mean[:, r, c] = mean_of_predictions
+                atc_predictions_variance[:, r, c] = variance_of_predictions
             # If list is empty (e.g., all params were NaN), outputs remain NaN
 
     print("Finished ATC prediction from loaded snapshots.")

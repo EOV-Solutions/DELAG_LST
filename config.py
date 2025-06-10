@@ -10,7 +10,7 @@ import datetime
 BASE_DATA_DIR = "/mnt/hdd12tb/code/nhatvm/DELAG/DELAG_LST" # USER TO VERIFY/SET THIS
 
 # Name of the specific ROI folder to process from BASE_DATA_DIR
-ROI_NAME = "BinhNguyen_KienXuong_ThaiBinh" # USER TO SET THIS to one of the subfolders
+ROI_NAME = "KhanhXuan_BuonMaThuot_DakLak" # USER TO SET THIS to one of the subfolders
 
 # Construct full paths for the selected ROI
 ROI_BASE_PATH = os.path.join(BASE_DATA_DIR, ROI_NAME)
@@ -54,20 +54,22 @@ GP_USE_NDVI_FEATURE = True # Set to True to use NDVI as a feature instead of S2 
 # S2_NIR_INDEX = 3  # Example: Corresponds to the 4th band (NIR)
 
 # --- Spatial Sampling for Training ---
-SPATIAL_TRAINING_SAMPLE_PERCENTAGE = 1 # Fraction of pixels to use for training (1.0 = all pixels)
+SPATIAL_TRAINING_SAMPLE_PERCENTAGE = 0.05 # Fraction of pixels to use for training (1.0 = all pixels)
 MIN_PIXELS_FOR_SPATIAL_SAMPLING = 100     # Minimum number of pixels if SPATIAL_TRAINING_SAMPLE_PERCENTAGE < 1.0
 
 # --- ATC Model Hyperparameters ---
-ATC_LEARNING_RATE = 0.0001
-ATC_EPOCHS = 1000
+ATC_LEARNING_RATE = 0.1
+ATC_EPOCHS = 10000
+ATC_INIT_SEARCH_TRIALS = 30
+ATC_INIT_SEARCH_EPOCHS = 1000
 ATC_WEIGHT_DECAY = 1e-5  # L2 regularization strength
-ATC_LR_SCHEDULER_PATIENCE = 15 # Patience for ReduceLROnPlateau
+ATC_LR_SCHEDULER_PATIENCE = 20 # Patience for ReduceLROnPlateau
 ATC_LR_SCHEDULER_FACTOR = 0.1   # Factor for ReduceLROnPlateau
 ATC_LR_SCHEDULER_MIN_LR = 1e-6  # Minimum LR for ReduceLROnPlateau
 ATC_ENSEMBLE_SNAPSHOTS = 200
-ATC_SNAPSHOT_INTERVAL = 4 # Save every 4 epochs
+ATC_SNAPSHOT_INTERVAL = 5 # Save every 4 epochs
 ATC_ENSEMBLE_START_EPOCH = ATC_EPOCHS - (ATC_ENSEMBLE_SNAPSHOTS * ATC_SNAPSHOT_INTERVAL)
-MIN_CLEAR_OBS_ATC = 30 # Minimum number of clear sky observations to train an ATC model for a pixel
+MIN_CLEAR_OBS_ATC = 40 # Minimum number of clear sky observations to train an ATC model for a pixel
 ATC_N_JOBS = 32  # Use all available CPU cores for ATC training. Set to 1 for no parallelization, or a specific number e.g., 4.
 ATC_LOSS_LOGGING_INTERVAL = 100 # Log loss every N epochs for map generation
 

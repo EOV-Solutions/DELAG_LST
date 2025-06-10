@@ -1,6 +1,9 @@
 """
 Utility functions for the DELAG project.
 """
+import matplotlib
+matplotlib.use('Agg')
+
 import numpy as np
 import os
 from sklearn.preprocessing import MinMaxScaler
