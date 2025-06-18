@@ -66,39 +66,36 @@ def main():
     try:
         # Phase 2.1: Train ATC models and save snapshots
         print("  Phase 2.1: Training ATC models and collecting snapshots/losses...")
-        # Now expects two return values: snapshots and interval loss maps
-        all_pixel_snapshots, interval_loss_maps_array = atc_model.train_and_collect_all_atc_snapshots(
+        # Now expects a dict of loss maps ('train', 'val')
+        all_pixel_snapshots, interval_loss_maps = atc_model.train_and_collect_all_atc_snapshots(
             preprocessed_data, config
         )
 
-        # --- Plot Mean ATC Training Loss ---
-        if interval_loss_maps_array is not None and interval_loss_maps_array.size > 0:
-            mean_losses_over_intervals = np.nanmean(interval_loss_maps_array, axis=(1, 2)) # Mean over H, W for each interval
-            num_intervals = interval_loss_maps_array.shape[0]
+        # --- Plot Mean ATC Training and Validation Loss ---
+        if interval_loss_maps and 'train' in interval_loss_maps and 'val' in interval_loss_maps:
+            train_loss_maps_array = interval_loss_maps['train']
+            val_loss_maps_array = interval_loss_maps['val']
+
+            mean_train_losses = np.nanmean(train_loss_maps_array, axis=(1, 2))
+            mean_val_losses = np.nanmean(val_loss_maps_array, axis=(1, 2))
+            
+            num_intervals = train_loss_maps_array.shape[0]
             loss_logging_interval = getattr(config, 'ATC_LOSS_LOGGING_INTERVAL', 100)
             epoch_ticks = [(i + 1) * loss_logging_interval for i in range(num_intervals)]
             
-            # Ensure epoch_ticks doesn't exceed ATC_EPOCHS if it was not a perfect multiple
-            if epoch_ticks and epoch_ticks[-1] > config.ATC_EPOCHS:
-                # Adjust the last tick or handle how epochs are displayed if desired.
-                # For simplicity, we can cap it or let it be if it represents the *end* of an interval beyond total epochs.
-                # The plot function can clarify this in its x-label.
-                pass 
-
             utils.plot_mean_atc_loss_over_intervals(
-                mean_interval_losses=list(mean_losses_over_intervals),
+                mean_train_losses=list(mean_train_losses),
+                mean_val_losses=list(mean_val_losses),
                 epoch_intervals_x_axis=epoch_ticks,
-                output_dir=config.OUTPUT_DIR, # Main output dir, plot_mean_atc_loss will put it in a 'viz' subdir
+                output_dir=config.OUTPUT_DIR,
                 roi_name=preprocessed_data.get('roi_name', 'UnknownROI'),
                 loss_logging_interval=loss_logging_interval
             )
         else:
-            print("  Skipping ATC mean loss plot as interval_loss_maps_array is None or empty.")
-        # --- End Plot Mean ATC Training Loss ---
+            print("  Skipping ATC mean loss plot as interval_loss_maps dict is incomplete or empty.")
+        # --- End Plot Mean ATC Loss ---
 
         # Define path for saving snapshots
-        # Ensure MODEL_WEIGHTS_PATH is defined in your config and the directory exists
-        # utils.create_output_directories should ideally create this too if it's under OUTPUT_DIR
         snapshots_filename = f"atc_snapshots_{preprocessed_data.get('roi_name', 'all')}.npz"
         snapshots_filepath = os.path.join(config.MODEL_WEIGHTS_PATH, snapshots_filename)
         

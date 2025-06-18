@@ -52,7 +52,7 @@ def train_atc_model_pixelwise(
     pixel_era5_clear: np.ndarray,
     app_config: 'config',
     pixel_identifier: str = "" # Keep for potential diagnostic messages
-) -> tuple[EnhancedATCModel | None, list[dict], list[float]]: # Model can be None
+) -> tuple[EnhancedATCModel | None, list[dict], dict[str, list[float]]]: # Model can be None, return dict for losses
     """
     Trains the Enhanced ATC model for a single pixel using a two-phase approach.
     Phase 1: Search for optimal initial parameters by running short training trials.
@@ -66,31 +66,66 @@ def train_atc_model_pixelwise(
         pixel_identifier (str, optional): Identifier for the pixel for logging.
 
     Returns:
-        tuple[EnhancedATCModel | None, list[dict], list[float]]: 
+        tuple[EnhancedATCModel | None, list[dict], dict[str, list[float]]]: 
             - The trained ATC model for the pixel.
             - A list of model state_dict snapshots for ensemble.
-            - A list of mean losses for each logging interval over the total epochs.
+            - A dictionary containing lists of mean 'train' and 'val' losses for each logging interval.
     """
     device = torch.device(app_config.ATC_DEVICE if torch.cuda.is_available() else "cpu")
     loss_fn = nn.MSELoss()
 
-    # Convert inputs to tensors
-    lst_tensor = torch.from_numpy(pixel_lst_clear).float().to(device)
-    doy_tensor = torch.from_numpy(pixel_doy_clear).float().to(device)
-    # pixel_era5_clear is expected shape (N, 2)
-    era5_tensor_1 = torch.from_numpy(pixel_era5_clear[:, 0]).float().to(device)
+    # --- Data Split ---
+    num_samples = len(pixel_lst_clear)
+    # Initialize loss dictionary for return in case of early exit
+    loss_logging_interval_setup = getattr(app_config, 'ATC_LOSS_LOGGING_INTERVAL', 100)
+    total_epochs_setup = app_config.ATC_EPOCHS
+    num_loss_intervals_setup = (total_epochs_setup + loss_logging_interval_setup - 1) // loss_logging_interval_setup
+    default_losses_dict = {
+        'train': [np.nan] * num_loss_intervals_setup,
+        'val': [np.nan] * num_loss_intervals_setup
+    }
 
-    # --- Phase 1: Search for best initial parameters ---
+    if num_samples < 2: # Not enough data to split
+        return None, [], default_losses_dict
+
+    indices = np.random.permutation(num_samples)
+    split_idx = int(num_samples * 0.9)
+    train_indices = indices[:split_idx]
+    val_indices = indices[split_idx:]
+
+    if len(train_indices) == 0 or len(val_indices) == 0:
+        # Not enough data for a meaningful train/val split, use all for training.
+        train_indices = indices
+        val_indices = [] # No validation set
+
+    # Convert all inputs to tensors first
+    lst_tensor_full = torch.from_numpy(pixel_lst_clear).float().to(device)
+    doy_tensor_full = torch.from_numpy(pixel_doy_clear).float().to(device)
+    era5_tensor_1_full = torch.from_numpy(pixel_era5_clear[:, 0]).float().to(device)
+
+    # Create train and val tensors from indices
+    lst_tensor_train = lst_tensor_full[train_indices]
+    doy_tensor_train = doy_tensor_full[train_indices]
+    era5_tensor_1_train = era5_tensor_1_full[train_indices]
+
+    if val_indices.size > 0:
+        lst_tensor_val = lst_tensor_full[val_indices]
+        doy_tensor_val = doy_tensor_full[val_indices]
+        era5_tensor_1_val = era5_tensor_1_full[val_indices]
+    else:
+        lst_tensor_val, doy_tensor_val, era5_tensor_1_val = None, None, None
+
+
+    # --- Phase 1: Search for best initial parameters (using training data only) ---
     init_search_trials = getattr(app_config, 'ATC_INIT_SEARCH_TRIALS', 20)
     init_search_epochs = getattr(app_config, 'ATC_INIT_SEARCH_EPOCHS', 40)
-    # print(f"ATC_INIT_SEARCH_TRIALS: {init_search_trials}, ATC_INIT_SEARCH_EPOCHS: {init_search_epochs}")
     
     best_initial_params = None
     best_loss = float('inf')
 
-    # Base values for randomization
-    initial_C_base = np.nanmean(pixel_lst_clear) if len(pixel_lst_clear) > 0 else 290.0
-    initial_A_base = np.nanstd(pixel_lst_clear) if len(pixel_lst_clear) > 1 else 10.0
+    # Base values for randomization from training data
+    initial_C_base = np.nanmean(pixel_lst_clear[train_indices]) if len(train_indices) > 0 else 290.0
+    initial_A_base = np.nanstd(pixel_lst_clear[train_indices]) if len(train_indices) > 1 else 10.0
     initial_phi_base = 180.0
     initial_b_base = 0.1
     
@@ -115,8 +150,8 @@ def train_atc_model_pixelwise(
             atc_model_trial.train()
             optimizer_trial.zero_grad()
             
-            predictions = atc_model_trial(doy_tensor, era5_tensor_1)
-            loss = loss_fn(predictions, lst_tensor)
+            predictions = atc_model_trial(doy_tensor_train, era5_tensor_1_train)
+            loss = loss_fn(predictions, lst_tensor_train)
             
             if torch.isnan(loss).any() or torch.isinf(loss).any():
                 trial_final_loss = float('inf')
@@ -159,9 +194,12 @@ def train_atc_model_pixelwise(
     loss_logging_interval = getattr(app_config, 'ATC_LOSS_LOGGING_INTERVAL', 100)
     total_epochs = app_config.ATC_EPOCHS
     num_loss_intervals = (total_epochs + loss_logging_interval - 1) // loss_logging_interval
-    interval_losses_output = [np.nan] * num_loss_intervals
+    interval_losses_output = {
+        'train': [np.nan] * num_loss_intervals,
+        'val': [np.nan] * num_loss_intervals
+    }
     
-    current_interval_losses = []
+    current_interval_train_losses = []
 
     phase2_epochs = total_epochs - init_search_epochs
     if phase2_epochs < 0:
@@ -176,28 +214,38 @@ def train_atc_model_pixelwise(
         atc_model.train()
         optimizer.zero_grad()
         
-        predictions = atc_model(doy_tensor, era5_tensor_1)
+        predictions = atc_model(doy_tensor_train, era5_tensor_1_train)
         
-        loss = loss_fn(predictions, lst_tensor)
+        loss = loss_fn(predictions, lst_tensor_train)
         
         loss.backward()
         if torch.isnan(loss).any() or torch.isinf(loss).any(): # Added check for inf loss
-            # On failure in phase 2, we return what we have, which will be mostly NaNs for losses.
-            return None, [], interval_losses_output # Return current state of interval_losses_output
+            # On failure in phase 2, return current losses (mostly NaNs).
+            return None, [], interval_losses_output
 
         optimizer.step()
         
-        current_interval_losses.append(loss.item())
+        current_interval_train_losses.append(loss.item())
 
-        # Step the scheduler
+        # Step the scheduler based on training loss
         scheduler.step(loss)
 
         # Log loss at interval
         if (global_epoch + 1) % loss_logging_interval == 0:
             current_interval_idx = global_epoch // loss_logging_interval
-            if current_interval_losses and current_interval_idx < num_loss_intervals:
-                interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
-            current_interval_losses = [] # Reset for next interval
+            if current_interval_train_losses and current_interval_idx < num_loss_intervals:
+                interval_losses_output['train'][current_interval_idx] = np.mean(current_interval_train_losses)
+            current_interval_train_losses = [] # Reset for next interval
+
+            # Calculate validation loss for the interval
+            if lst_tensor_val is not None:
+                atc_model.eval() # Switch to evaluation mode
+                with torch.no_grad():
+                    val_predictions = atc_model(doy_tensor_val, era5_tensor_1_val)
+                    val_loss = loss_fn(val_predictions, lst_tensor_val)
+                    if current_interval_idx < num_loss_intervals:
+                        interval_losses_output['val'][current_interval_idx] = val_loss.item()
+                atc_model.train() # Switch back to training mode
 
         # Store snapshots for ensemble
         if (global_epoch >= app_config.ATC_ENSEMBLE_START_EPOCH and 
@@ -205,52 +253,58 @@ def train_atc_model_pixelwise(
             snapshots.append({k: v.clone().cpu().detach() for k, v in atc_model.state_dict().items()})
             if len(snapshots) >= app_config.ATC_ENSEMBLE_SNAPSHOTS:
                 # If we break early, handle the last partial loss interval
-                if current_interval_losses:
+                if current_interval_train_losses:
                     current_interval_idx = global_epoch // loss_logging_interval
                     if current_interval_idx < num_loss_intervals:
-                        interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
+                        # Log train loss
+                        interval_losses_output['train'][current_interval_idx] = np.mean(current_interval_train_losses)
+                        # Log val loss one last time if possible
+                        if lst_tensor_val is not None:
+                            atc_model.eval()
+                            with torch.no_grad():
+                                val_predictions = atc_model(doy_tensor_val, era5_tensor_1_val)
+                                val_loss = loss_fn(val_predictions, lst_tensor_val)
+                                if current_interval_idx < num_loss_intervals:
+                                    interval_losses_output['val'][current_interval_idx] = val_loss.item()
+                            atc_model.train()
                 break 
     
-    # Handle final partial interval if training finished all epochs and didn't align with an interval boundary
-    if current_interval_losses and last_global_epoch != -1:
+    # Handle final partial interval if training finished all epochs
+    if current_interval_train_losses and last_global_epoch != -1:
         current_interval_idx = last_global_epoch // loss_logging_interval
-        # Only fill if the slot hasn't been filled by other logic (e.g., snapshot break)
-        if current_interval_idx < num_loss_intervals and np.isnan(interval_losses_output[current_interval_idx]):
-             interval_losses_output[current_interval_idx] = np.mean(current_interval_losses)
+        if current_interval_idx < num_loss_intervals and np.isnan(interval_losses_output['train'][current_interval_idx]):
+             interval_losses_output['train'][current_interval_idx] = np.mean(current_interval_train_losses)
+             # Note: Validation loss is only calculated at interval boundaries, so no need to calculate it here.
 
     return atc_model, snapshots, interval_losses_output
 
-# MODIFIED for returning interval losses
+# MODIFIED for returning structured interval losses
 def _train_pixel_atc_worker(
-    r: int, c: int, # Added type hints
+    r: int, c: int,
     pixel_lst_all_times_slice: np.ndarray,
     pixel_era5_all_times_slice: np.ndarray,
     doy_stack_all_days_numpy: np.ndarray,
     app_config: 'config',
-    num_times_for_output: int # Added type hint, kept arg for now
-) -> tuple[int, int, list[dict], list[float]]: # Corrected return type hint
+    num_times_for_output: int 
+) -> tuple[int, int, list[dict], dict[str, list[float]]]: # Return dict of loss lists
     """
     Worker function to train ATC for a single pixel, return snapshots and interval losses.
     """
     worker_device_str = app_config.ATC_DEVICE
     if app_config.ATC_DEVICE.lower() == "cuda" and getattr(app_config, 'ATC_N_JOBS', -1) != 1:
-        # If ATC is set to CUDA but running in parallel (ATC_N_JOBS != 1),
-        # force CPU for worker to avoid issues with joblib/multiprocessing and CUDA contexts.
-        # The main process might still use CUDA for other things if DEVICE is CUDA,
-        # but these specific parallel workers will use CPU.
         worker_device_str = "cpu" 
-        # print(f"ATC Worker Info: ATC_DEVICE is CUDA and ATC_N_JOBS != 1. Forcing CPU for this worker.") # Optional debug
     
-    # Determine device for this worker based on the logic above
     device = torch.device(worker_device_str if torch.cuda.is_available() and worker_device_str.lower() == "cuda" else "cpu")
-    # print(f"ATC Worker {pixel_id_str} using device: {device}") # Optional debug
 
     pixel_id_str = f"Pixel ({r},{c})"
     
-    # Initialize default interval losses (all NaNs)
+    # Initialize default interval losses (all NaNs) as a dictionary
     loss_logging_interval = getattr(app_config, 'ATC_LOSS_LOGGING_INTERVAL', 100)
     num_loss_intervals = (app_config.ATC_EPOCHS + loss_logging_interval - 1) // loss_logging_interval
-    default_interval_losses = [np.nan] * num_loss_intervals
+    default_interval_losses = {
+        'train': [np.nan] * num_loss_intervals,
+        'val': [np.nan] * num_loss_intervals
+    }
 
     if np.isnan(pixel_era5_all_times_slice).all():
         return r, c, [], default_interval_losses # Return empty snapshots and default losses
@@ -260,7 +314,6 @@ def _train_pixel_atc_worker(
     pixel_doy_clear = doy_stack_all_days_numpy[clear_sky_indices]
     pixel_era5_clear = pixel_era5_all_times_slice[clear_sky_indices]
     
-    # pixel_era5_clear has two bands: shape (N,2)
     mask_lst = ~np.isnan(pixel_lst_clear)
     mask_era5_1 = ~np.isnan(pixel_era5_clear[:, 0])
     mask_era5_2 = ~np.isnan(pixel_era5_clear[:, 1])
@@ -270,7 +323,7 @@ def _train_pixel_atc_worker(
     pixel_era5_clear_valid = pixel_era5_clear[valid_data_mask]
 
     model_snapshots = []
-    pixel_interval_losses_final = default_interval_losses[:] # Copy
+    pixel_interval_losses_final = {k: v[:] for k, v in default_interval_losses.items()} # Deep copy
 
     if len(pixel_lst_clear_valid) >= app_config.MIN_CLEAR_OBS_ATC:
         if not (np.isnan(pixel_lst_clear_valid).any() or \
@@ -283,7 +336,7 @@ def _train_pixel_atc_worker(
             )
             if trained_model_pixel and model_snaps_from_train:
                 model_snapshots = model_snaps_from_train
-            # Use interval_losses_from_train regardless of whether model was trained (it's pre-filled with NaNs)
+            # Use interval_losses_from_train regardless of whether model was trained
             pixel_interval_losses_final = interval_losses_from_train 
     
     # Ensure snapshots list is padded if needed (as before)
@@ -302,16 +355,17 @@ def _train_pixel_atc_worker(
 
     return r, c, model_snapshots, pixel_interval_losses_final
 
-# MODIFIED to collect snapshots AND interval loss maps
+# MODIFIED to collect and return dict of loss maps
 def train_and_collect_all_atc_snapshots(
     preprocessed_data: dict, app_config: 'config'
-) -> tuple[dict[tuple[int, int], list[dict]], np.ndarray]: # Added more specific type hint
+) -> tuple[dict[tuple[int, int], list[dict]], dict[str, np.ndarray]]: # Return dict of loss maps
     """
     Trains ATC models for all pixels, collects snapshots, and interval loss maps.
     Returns:
-        tuple[dict[tuple[int, int], list[dict]], np.ndarray]:
+        tuple[dict[tuple[int, int], list[dict]], dict[str, np.ndarray]]:
             - all_pixel_snapshots: Dict mapping (r,c) to list of state_dict snapshots.
-            - interval_loss_maps_array: NumPy array (num_intervals, height, width) of mean losses.
+            - interval_loss_maps: Dict with 'train' and 'val' keys, each mapping to a 
+                                  NumPy array (num_intervals, height, width) of mean losses.
     """
     lst_stack = preprocessed_data["lst_stack"]
     era5_stack = preprocessed_data["era5_stack"]
@@ -373,29 +427,34 @@ def train_and_collect_all_atc_snapshots(
 
     all_pixel_snapshots = {}
     
-    # Prepare structure for interval loss maps
+    # Prepare structure for interval loss maps (train and val)
     loss_logging_interval = getattr(app_config, 'ATC_LOSS_LOGGING_INTERVAL', 100)
     num_loss_intervals = (app_config.ATC_EPOCHS + loss_logging_interval -1) // loss_logging_interval
-    interval_loss_maps_array = np.full((num_loss_intervals, height, width), np.nan, dtype=np.float32)
+    interval_loss_maps = {
+        'train': np.full((num_loss_intervals, height, width), np.nan, dtype=np.float32),
+        'val': np.full((num_loss_intervals, height, width), np.nan, dtype=np.float32)
+    }
 
     print("Collecting snapshots and interval losses from parallel ATC training...")
-    for r_res, c_res, snapshots_for_pixel, interval_losses_for_pixel in tqdm(results, desc="Organizing Results"):
+    for r_res, c_res, snapshots_for_pixel, interval_losses_dict in tqdm(results, desc="Organizing Results"):
         all_pixel_snapshots[(r_res, c_res)] = snapshots_for_pixel
-        # Ensure interval_losses_for_pixel is a list of the correct length for assignment
-        # It should already be padded with NaNs by the worker if training was shorter.
-        if len(interval_losses_for_pixel) == num_loss_intervals:
+        
+        # Unpack the dictionary of losses and populate the respective maps
+        train_losses = interval_losses_dict.get('train', [])
+        val_losses = interval_losses_dict.get('val', [])
+
+        if len(train_losses) == num_loss_intervals:
             for interval_idx in range(num_loss_intervals):
-                interval_loss_maps_array[interval_idx, r_res, c_res] = interval_losses_for_pixel[interval_idx]
-        else: # Should ideally not happen if worker pads correctly
-            # print(f"Warning: Pixel ({r_res},{c_res}) had {len(interval_losses_for_pixel)} loss values, expected {num_loss_intervals}. Padding with NaN.")
-            for interval_idx in range(min(len(interval_losses_for_pixel), num_loss_intervals)):
-                 interval_loss_maps_array[interval_idx, r_res, c_res] = interval_losses_for_pixel[interval_idx]
-            # Remaining will stay NaN
+                interval_loss_maps['train'][interval_idx, r_res, c_res] = train_losses[interval_idx]
+        
+        if len(val_losses) == num_loss_intervals:
+            for interval_idx in range(num_loss_intervals):
+                interval_loss_maps['val'][interval_idx, r_res, c_res] = val_losses[interval_idx]
     
-    # For pixels not in training_pixel_mask, their entries in interval_loss_maps_array will remain NaN.
+    # For pixels not in training_pixel_mask, their entries in interval_loss_maps will remain NaN.
     
     print("Finished collecting all ATC model snapshots and interval losses.")
-    return all_pixel_snapshots, interval_loss_maps_array
+    return all_pixel_snapshots, interval_loss_maps
 
 def save_atc_snapshots(all_pixel_snapshots: dict, filepath: str, image_height: int, image_width: int, num_snapshots_expected: int):
     """
@@ -568,7 +627,7 @@ def predict_atc_from_loaded_snapshots(
                 # Calculate mean of predictions and variance of predictions (ensemble uncertainty)
                 mean_of_predictions = np.nanmean(pixel_ensemble_preds_stack, axis=0)
                 variance_of_predictions = np.nanvar(pixel_ensemble_preds_stack, axis=0)
-                
+
                 atc_predictions_mean[:, r, c] = mean_of_predictions
                 atc_predictions_variance[:, r, c] = variance_of_predictions
             # If list is empty (e.g., all params were NaN), outputs remain NaN

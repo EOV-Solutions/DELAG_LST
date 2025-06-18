@@ -518,75 +518,73 @@ def visualize_daily_stacks_comparison(
     plt.close(fig) # Close the figure to free memory 
 
 def plot_mean_atc_loss_over_intervals(
-    mean_interval_losses: list[float], 
+    mean_train_losses: list[float], 
+    mean_val_losses: list[float],
     epoch_intervals_x_axis: list[int], 
     output_dir: str, 
     roi_name: str,
     loss_logging_interval: int
 ):
     """
-    Plots the mean ATC training loss over specified epoch intervals and saves the plot.
+    Plots the mean training and validation loss for the ATC model over training intervals.
 
     Args:
-        mean_interval_losses (list[float]): List of mean loss values for each interval.
-        epoch_intervals_x_axis (list[int]): List of epoch numbers marking the end of each interval (for x-axis).
-        output_dir (str): The base output directory (e.g., config.OUTPUT_DIR).
-        roi_name (str): Name of the ROI for the plot filename.
-        loss_logging_interval (int): The interval at which losses were logged (e.g., 100 epochs).
+        mean_train_losses (list[float]): List of mean training losses per interval.
+        mean_val_losses (list[float] or np.ndarray): List or array of mean validation losses per interval. Can be None.
+        epoch_intervals_x_axis (list[int]): X-axis ticks representing the end epoch of each interval.
+        output_dir (str): Directory to save the plot.
+        roi_name (str): Name of the ROI for the plot title and filename.
+        loss_logging_interval (int): The interval used for logging, for the plot label.
     """
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        print("Matplotlib is not installed. Skipping mean ATC loss plot.")
+        print("Matplotlib is not installed. Skipping ATC loss plot.")
         return
 
-    if not mean_interval_losses or not epoch_intervals_x_axis:
-        print("Mean interval losses or epoch intervals are empty. Skipping plot.")
-        return
-    
-    if len(mean_interval_losses) != len(epoch_intervals_x_axis):
-        print(f"Warning: Mismatch in length of mean_interval_losses ({len(mean_interval_losses)}) and epoch_intervals_x_axis ({len(epoch_intervals_x_axis)}). Skipping plot.")
-        return
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(12, 7))
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Filter out NaN values for plotting, as matplotlib might not handle them well in line plots directly
-    # or may show gaps, which is acceptable.
-    valid_indices = [i for i, loss in enumerate(mean_interval_losses) if not np.isnan(loss)]
-    plottable_losses = [mean_interval_losses[i] for i in valid_indices]
-    plottable_epochs = [epoch_intervals_x_axis[i] for i in valid_indices]
+    # Plot training loss
+    # Filter out NaNs for plotting
+    valid_train_indices = [i for i, loss in enumerate(mean_train_losses) if np.isfinite(loss)]
+    if valid_train_indices:
+        valid_train_epochs = [epoch_intervals_x_axis[i] for i in valid_train_indices]
+        valid_train_losses = [mean_train_losses[i] for i in valid_train_indices]
+        ax.plot(valid_train_epochs, valid_train_losses, 'o-', color='dodgerblue', label='Mean Training Loss', markersize=4)
 
-    if not plottable_losses:
-        print("No valid (non-NaN) mean interval losses to plot. Skipping plot.")
-        plt.close(fig)
-        return
+    # Plot validation loss if available
+    if mean_val_losses is not None:
+        # Check if it's a list or numpy array and if it has finite values
+        valid_val_indices = [i for i, loss in enumerate(mean_val_losses) if np.isfinite(loss)]
+        if valid_val_indices:
+            valid_val_epochs = [epoch_intervals_x_axis[i] for i in valid_val_indices]
+            valid_val_losses = [mean_val_losses[i] for i in valid_val_indices]
+            if len(valid_val_losses) == len(valid_val_epochs):
+                ax.plot(valid_val_epochs, valid_val_losses, 's--', color='orangered', label='Mean Validation Loss', markersize=4)
 
-    ax.plot(plottable_epochs, plottable_losses, marker='o', linestyle='-')
+    ax.set_xlabel(f"Epoch (Logged Every {loss_logging_interval} Epochs)")
+    ax.set_ylabel("Mean Squared Error (MSE) Loss")
+    ax.set_title(f"ATC Model - Mean Training & Validation Loss for {roi_name}")
+    ax.legend()
+    ax.set_yscale('log') # Log scale is often better for viewing loss curves
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
     
-    ax.set_xlabel(f"Epoch (Loss averaged over previous {loss_logging_interval} epochs)")
-    ax.set_ylabel("Mean Spatial ATC Training Loss (MSE)")
-    ax.set_title(f"Mean ATC Training Loss for {roi_name}")
-    ax.grid(True, linestyle='--', alpha=0.7)
-    
-    # Ensure x-axis ticks are sensible, especially if intervals are many
-    if len(plottable_epochs) > 10:
-        ax.set_xticks(plottable_epochs[::len(plottable_epochs)//10]) # Show about 10 ticks
-    else:
-        ax.set_xticks(plottable_epochs)
-    
+    # Improve x-axis ticks if there are many intervals
+    if len(epoch_intervals_x_axis) > 20:
+        plt.xticks(rotation=45, ha='right')
+
     plt.tight_layout()
-
-    plot_viz_dir = os.path.join(output_dir, "viz") # Consistent with other viz functions
-    os.makedirs(plot_viz_dir, exist_ok=True)
     
-    filename = os.path.join(plot_viz_dir, f"mean_atc_training_loss_{roi_name}.png")
+    # Save the figure
+    plot_filename = os.path.join(output_dir, f"atc_mean_loss_curve_{roi_name}.png")
     try:
-        plt.savefig(filename, dpi=150)
-        print(f"Saved mean ATC training loss plot to {filename}")
+        fig.savefig(plot_filename, dpi=300)
+        print(f"ATC mean loss curve plot saved to {plot_filename}")
     except Exception as e:
-        print(f"Error saving mean ATC loss plot: {e}")
+        print(f"Error saving ATC mean loss curve plot: {e}")
     
-    plt.close(fig) # Close the figure to free memory 
+    plt.close(fig)
 
 def plot_mean_gp_loss_over_intervals(
     mean_interval_losses: list[float], 
