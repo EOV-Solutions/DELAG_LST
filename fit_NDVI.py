@@ -82,7 +82,7 @@ def fit_ndvi_to_lst(lst_dates, ndvi_date_files, window_days):
 
 def main(data_dir, window_days):
     lst_dir = os.path.join(data_dir, 'lst')
-    ndvi_dir = os.path.join(data_dir, 'ndvi_infer_8days')
+    ndvi_dir = os.path.join(data_dir, 'ndvi_infer')
 
     if not os.path.isdir(lst_dir):
         print(f"Error: LST directory not found: {lst_dir}")

@@ -697,9 +697,9 @@ def plot_input_data_timeseries_overview(
 
     plt.figure(figsize=(12, 7))
     
-    plt.plot(doy_stack_numpy, mean_lst_timeseries, marker='o', linestyle='-', label='Mean LST (Training Pixels)')
-    plt.plot(doy_stack_numpy, mean_era5_band1_timeseries, marker='x', linestyle='--', label='Mean ERA5 Band 1 (Training Pixels)')
-    plt.plot(doy_stack_numpy, mean_era5_band2_timeseries, marker='s', linestyle=':', label='Mean ERA5 Band 2 (Training Pixels)')
+    plt.scatter(doy_stack_numpy, mean_lst_timeseries, marker='o', label='Mean LST (Training Pixels)', s=25)
+    plt.scatter(doy_stack_numpy, mean_era5_band1_timeseries, marker='x', label='Mean ERA5 Band 1 (Training Pixels)', s=25)
+    plt.scatter(doy_stack_numpy, mean_era5_band2_timeseries, marker='s', label='Mean ERA5 Band 2 (Training Pixels)', s=25)
 
     plt.title(f"Input Data Timeseries Overview for {roi_name} (Spatially Averaged over Training Pixels)")
     plt.xlabel("Day of Year (DOY)")

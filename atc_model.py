@@ -27,6 +27,9 @@ class EnhancedATCModel(nn.Module):
         self.C = nn.Parameter(torch.tensor(initial_params.get('C', 290.0) if initial_params else 290.0)) # Avg temp in Kelvin
         self.A = nn.Parameter(torch.tensor(initial_params.get('A', 10.0) if initial_params else 10.0))   # Amplitude in Kelvin
         self.phi = nn.Parameter(torch.tensor(initial_params.get('phi', 180.0) if initial_params else 180.0)) # Phase shift in days
+        self.A_2 = nn.Parameter(torch.tensor(initial_params.get('A_2', 1.0) if initial_params else 1.0))   # Amplitude of second harmonic
+        self.phi_2 = nn.Parameter(torch.tensor(initial_params.get('phi_2', 90.0) if initial_params else 90.0)) # Phase shift of second harmonic
+        
         self.b = nn.Parameter(torch.tensor(initial_params.get('b', 0.5) if initial_params else 0.5))     # ERA5 coefficient
         
         self.days_in_year = config.DAYS_OF_YEAR # From config file
@@ -43,7 +46,9 @@ class EnhancedATCModel(nn.Module):
             torch.Tensor: Predicted LST (T_ATC).
         """
         term_cos = torch.cos(2 * np.pi / self.days_in_year * (doy - self.phi))
-        t_atc = self.C + self.A * term_cos + self.b * t_era5_1
+        term_sin = torch.sin(2 * np.pi / self.days_in_year * (doy - self.phi_2))
+        t_atc = self.C + self.A * term_cos + self.A_2 * term_sin + self.b * t_era5_1
+        # t_atc = self.C + self.A * term_cos
         return t_atc
 
 def train_atc_model_pixelwise(
@@ -72,7 +77,7 @@ def train_atc_model_pixelwise(
             - A dictionary containing lists of mean 'train' and 'val' losses for each logging interval.
     """
     device = torch.device(app_config.ATC_DEVICE if torch.cuda.is_available() else "cpu")
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.L1Loss()  # Changed from MSELoss to L1Loss to match paper specification
 
     # --- Data Split ---
     num_samples = len(pixel_lst_clear)
@@ -135,10 +140,12 @@ def train_atc_model_pixelwise(
     for _ in range(init_search_trials):
         # Randomize initial parameters as requested: base * random_float(0-1)
         trial_initial_params = {
-            'C': initial_C_base_val * np.random.rand()/2,
-            'A': initial_A_base_val * np.random.rand()/2,
-            'phi': initial_phi_base * np.random.rand()/2,
-            'b': initial_b_base * np.random.rand()/2,
+            'C': initial_C_base_val * (0.5 + np.random.rand()),
+            'A': initial_A_base_val * np.random.rand(),
+            'phi': initial_phi_base * (0.5 + np.random.rand()),
+            'A_2': (initial_A_base_val / 5) * np.random.rand(), # A_2 is typically smaller
+            'phi_2': initial_phi_base * np.random.rand(),
+            'b': initial_b_base * (0.5 + np.random.rand()),
         }
         
         # Short training for this trial
@@ -171,6 +178,8 @@ def train_atc_model_pixelwise(
             'C': initial_C_base_val,
             'A': initial_A_base_val,
             'phi': initial_phi_base,
+            'A_2': initial_A_base_val / 5, # A_2 is typically smaller
+            'phi_2': initial_phi_base / 2,
             'b': initial_b_base,
         }
 
@@ -348,6 +357,7 @@ def _train_pixel_atc_worker(
         default_params_for_snapshot = {
             'C': torch.tensor(default_initial_C), 'A': torch.tensor(default_initial_A),
             'phi': torch.tensor(180.0), 'b': torch.tensor(0.5),
+            'A_2': torch.tensor(default_initial_A / 5.0), 'phi_2': torch.tensor(90.0) # Add new defaults
         }
         num_needed_snapshots = app_config.ATC_ENSEMBLE_SNAPSHOTS
         while len(model_snapshots) < num_needed_snapshots:
@@ -473,6 +483,8 @@ def save_atc_snapshots(all_pixel_snapshots: dict, filepath: str, image_height: i
     C_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
     A_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
     phi_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
+    A_2_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
+    phi_2_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
     b_stack = np.full((num_snapshots_expected, image_height, image_width), np.nan, dtype=np.float32)
 
     print(f"Structuring snapshots for saving. Expected snapshots per pixel: {num_snapshots_expected}")
@@ -494,13 +506,17 @@ def save_atc_snapshots(all_pixel_snapshots: dict, filepath: str, image_height: i
             C_stack[idx, r, c] = state_dict.get('C', np.nan) if torch.is_tensor(state_dict.get('C', np.nan)) else float(state_dict.get('C', np.nan))
             A_stack[idx, r, c] = state_dict.get('A', np.nan) if torch.is_tensor(state_dict.get('A', np.nan)) else float(state_dict.get('A', np.nan))
             phi_stack[idx, r, c] = state_dict.get('phi', np.nan) if torch.is_tensor(state_dict.get('phi', np.nan)) else float(state_dict.get('phi', np.nan))
+            A_2_stack[idx, r, c] = state_dict.get('A_2', np.nan) if torch.is_tensor(state_dict.get('A_2', np.nan)) else float(state_dict.get('A_2', np.nan))
+            phi_2_stack[idx, r, c] = state_dict.get('phi_2', np.nan) if torch.is_tensor(state_dict.get('phi_2', np.nan)) else float(state_dict.get('phi_2', np.nan))
             b_stack[idx, r, c] = state_dict.get('b', np.nan) if torch.is_tensor(state_dict.get('b', np.nan)) else float(state_dict.get('b', np.nan))
 
     print(f"Saving snapshot stacks to {filepath}...")
     np.savez_compressed(filepath, 
                         C_snapshots=C_stack, 
                         A_snapshots=A_stack, 
-                        phi_snapshots=phi_stack, 
+                        phi_snapshots=phi_stack,
+                        A_2_snapshots=A_2_stack,
+                        phi_2_snapshots=phi_2_stack,
                         b_snapshots=b_stack)
     print(f"Snapshots saved successfully.")
 
@@ -524,6 +540,8 @@ def load_atc_snapshots(filepath: str) -> dict:
         "C_snapshots": data.get('C_snapshots'), # Use .get() in case file is from older version or MLP (where this won't be)
         "A_snapshots": data.get('A_snapshots'),
         "phi_snapshots": data.get('phi_snapshots'),
+        "A_2_snapshots": data.get('A_2_snapshots'),
+        "phi_2_snapshots": data.get('phi_2_snapshots'),
         "b_snapshots": data.get('b_snapshots'),
     }
     # It would be good to save/load ATC_MODEL_TYPE with the snapshots.
@@ -553,6 +571,8 @@ def predict_atc_from_loaded_snapshots(
     C_snaps = loaded_snapshots_data['C_snapshots'] # (num_snaps, height, width)
     A_snaps = loaded_snapshots_data['A_snapshots']
     phi_snaps = loaded_snapshots_data['phi_snapshots']
+    A_2_snaps = loaded_snapshots_data.get('A_2_snapshots') # Use .get for backward compatibility
+    phi_2_snaps = loaded_snapshots_data.get('phi_2_snapshots')
     b_snaps = loaded_snapshots_data['b_snapshots']
 
     num_snapshots, height, width = C_snaps.shape
@@ -573,7 +593,7 @@ def predict_atc_from_loaded_snapshots(
 
     # Create a single model instance to reuse
     # Initialize with dummy params, will be overwritten by loaded snapshots
-    temp_model_initial_params = {'C':0.0,'A':0.0,'phi':0.0,'b':0.0}
+    temp_model_initial_params = {'C':0.0,'A':0.0,'phi':0.0,'A_2':0.0,'phi_2':0.0,'b':0.0}
     temp_model = EnhancedATCModel(initial_params=temp_model_initial_params).to(device)
     temp_model.eval() # Set to evaluation mode
 
@@ -597,11 +617,16 @@ def predict_atc_from_loaded_snapshots(
                 current_A = A_snaps[snap_idx, r, c]
                 current_phi = phi_snaps[snap_idx, r, c]
                 current_b = b_snaps[snap_idx, r, c]
+                # Handle new params with backward compatibility
+                current_A_2 = A_2_snaps[snap_idx, r, c] if A_2_snaps is not None else 0.0
+                current_phi_2 = phi_2_snaps[snap_idx, r, c] if phi_2_snaps is not None else 0.0
 
                 current_params = {
                     'C': torch.tensor(current_C, device=device),
                     'A': torch.tensor(current_A, device=device),
                     'phi': torch.tensor(current_phi, device=device),
+                    'A_2': torch.tensor(current_A_2, device=device),
+                    'phi_2': torch.tensor(current_phi_2, device=device),
                     'b': torch.tensor(current_b, device=device),
                 }
                 

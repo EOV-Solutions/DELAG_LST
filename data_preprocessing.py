@@ -169,6 +169,127 @@ def load_landsat_lst(
         raise ValueError("No Landsat LST data could be loaded based on available files and date filters.")
 
     lst_stack_nan = np.stack(lst_data_list, axis=0)
+
+    # --- Outlier removal based on selected method from config ---
+    outlier_method = getattr(app_config, 'LST_OUTLIER_METHOD', 'none').lower()
+    print(f"Applying '{outlier_method}' LST outlier detection method.")
+
+    if outlier_method == 'percentile':
+        lower_percentile = getattr(app_config, 'LST_PERCENTILE_LOWER', 10)
+        upper_percentile = getattr(app_config, 'LST_PERCENTILE_UPPER', 90)
+        valid_lst_values = lst_stack_nan[~np.isnan(lst_stack_nan)]
+        
+        if valid_lst_values.size > 0:
+            lower_bound = np.percentile(valid_lst_values, lower_percentile)
+            upper_bound = np.percentile(valid_lst_values, upper_percentile)
+            
+            print(f"Using percentile method: Lower bound ({lower_percentile}%)={lower_bound:.2f}, Upper bound ({upper_percentile}%)={upper_bound:.2f}")
+            
+            outlier_mask = (lst_stack_nan < lower_bound) | (lst_stack_nan > upper_bound)
+            num_outliers = np.sum(outlier_mask)
+            
+            if num_outliers > 0:
+                print(f"Removing {num_outliers} outlier pixels ({num_outliers / valid_lst_values.size * 100:.2f}% of valid data).")
+                lst_stack_nan[outlier_mask] = np.nan
+        else:
+            print("No valid LST data to perform outlier removal on.")
+
+    elif outlier_method == 'mad':
+        valid_lst_values = lst_stack_nan[~np.isnan(lst_stack_nan)]
+        if valid_lst_values.size > 0:
+            median = np.median(valid_lst_values)
+            abs_dev = np.abs(valid_lst_values - median)
+            mad = np.median(abs_dev)
+            
+            if mad > 1e-9:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    modified_z_score = 0.6745 * (lst_stack_nan - median) / mad
+                
+                threshold = getattr(app_config, 'LST_MAD_THRESHOLD', 3.5)
+                print(f"Using Median Absolute Deviation (MAD) method: Median={median:.2f}, MAD={mad:.2f}, Threshold={threshold}")
+                
+                outlier_mask = np.abs(modified_z_score) > threshold
+                num_outliers = np.sum(outlier_mask)
+                
+                if num_outliers > 0:
+                    print(f"Removing {num_outliers} outlier pixels ({num_outliers / valid_lst_values.size * 100:.2f}% of valid data).")
+                    lst_stack_nan[outlier_mask] = np.nan
+            else:
+                print("MAD is zero, cannot calculate modified Z-score. Skipping outlier removal.")
+        else:
+            print("No valid LST data to perform outlier removal on.")
+            
+    elif outlier_method == 'trend_detect':
+        print("Starting trend_detect outlier removal. This can be very slow.")
+        try:
+            from statsmodels.tsa.seasonal import seasonal_decompose
+        except ImportError:
+            print("\nERROR: 'statsmodels' library is required for 'trend_detect' method.")
+            print("Please install it (e.g., 'pip install statsmodels') and restart.")
+            raise
+        
+        _, height, width = lst_stack_nan.shape
+        min_obs = getattr(app_config, 'LST_TREND_MIN_OBS', 20)
+        resid_threshold = getattr(app_config, 'LST_TREND_RESID_THRESHOLD', 3.0)
+        
+        total_outlier_mask = np.zeros_like(lst_stack_nan, dtype=bool)
+
+        for r in tqdm(range(height), desc="Trend Detection (rows)"):
+            for c in range(width):
+                pixel_timeseries = lst_stack_nan[:, r, c]
+                valid_mask_indices = np.where(~np.isnan(pixel_timeseries))[0]
+                
+                if len(valid_mask_indices) < min_obs:
+                    continue
+
+                pixel_series_pd = pd.Series(
+                    pixel_timeseries[valid_mask_indices], 
+                    index=pd.to_datetime([loaded_dates[i] for i in valid_mask_indices])
+                )
+                
+                days_in_range = (pixel_series_pd.index.max() - pixel_series_pd.index.min()).days
+                years_in_range = max(1, days_in_range) / 365.25
+                obs_per_year = len(pixel_series_pd) / years_in_range
+
+                period_int = max(2, int(round(obs_per_year)))
+                if len(pixel_series_pd) < 2 * period_int:
+                    continue
+
+                try:
+                    decomp = seasonal_decompose(pixel_series_pd, model='additive', period=period_int, extrapolate_trend='freq')
+                    residuals = decomp.resid.dropna()
+                    
+                    if residuals.empty:
+                        continue
+
+                    resid_median = residuals.median()
+                    resid_mad = (residuals - resid_median).abs().median()
+                    
+                    if resid_mad > 1e-9:
+                        is_outlier_resid = (residuals - resid_median).abs() > (resid_threshold * resid_mad)
+                        outlier_dates = residuals[is_outlier_resid].index
+
+                        for outlier_dt in outlier_dates:
+                            try:
+                                t_idx = loaded_dates.index(outlier_dt)
+                                total_outlier_mask[t_idx, r, c] = True
+                            except ValueError:
+                                continue
+                except Exception:
+                    pass
+
+        total_outliers_found = np.sum(total_outlier_mask)
+        if total_outliers_found > 0:
+            print(f"Found and removed {total_outliers_found} outliers using trend_detect method.")
+            lst_stack_nan[total_outlier_mask] = np.nan
+        else:
+            print("No outliers found with trend_detect method.")
+
+    elif outlier_method != 'none':
+        print(f"Warning: Unknown LST_OUTLIER_METHOD '{outlier_method}'. Skipping outlier removal.")
+    
+    # --- End of outlier removal ---
+    
     # valid_pixel_counts_sparse = np.sum(~np.isnan(lst_stack_nan), axis=0) # Recalculate if needed
 
     print(f"Loaded {len(loaded_dates)} LST scenes. Stack shape: {lst_stack_nan.shape}")
