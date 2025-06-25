@@ -10,7 +10,7 @@ import datetime
 BASE_DATA_DIR = "/mnt/hdd12tb/code/nhatvm/DELAG/DELAG_LST/download_data_v3" # USER TO VERIFY/SET THIS
 
 # Name of the specific ROI folder to process from BASE_DATA_DIR
-ROI_NAME = "BinhNguyen_KienXuong_ThaiBinh" # USER TO SET THIS to one of the subfolders
+ROI_NAME = "KhanhXuan_BuonMaThuot_DakLak" # USER TO SET THIS to one of the subfolders
 
 # Construct full paths for the selected ROI
 ROI_BASE_PATH = os.path.join(BASE_DATA_DIR, ROI_NAME)
@@ -62,7 +62,7 @@ GP_USE_NDVI_FEATURE = True # Set to True to use NDVI as a feature instead of S2 
 # S2_NIR_INDEX = 3  # Example: Corresponds to the 4th band (NIR)
 
 # --- LST Outlier Detection ---
-# Method can be 'percentile', 'mad', 'trend_detect', or 'none' to disable.
+# Method can be 'percentile', 'mad', 'trend_detect', 'sudden_change', 'iqr', or 'none' to disable.
 LST_OUTLIER_METHOD = 'percentile' 
 
 # Parameters for 'percentile' method
@@ -75,10 +75,16 @@ LST_MAD_THRESHOLD = 3.5 # Modified Z-score threshold
 # Parameters for 'trend_detect' method (per-pixel seasonal decomposition)
 # This method is computationally expensive.
 LST_TREND_MIN_OBS = 20 # Min clear observations for a pixel to run trend detection
-LST_TREND_RESID_THRESHOLD = 3.0 # Threshold for residual standard deviations to be an outlier
+LST_TREND_RESID_THRESHOLD = 5.0 # Threshold for residual standard deviations to be an outlier
+
+# Parameter for 'sudden_change' method
+LST_SUDDEN_CHANGE_THRESHOLD_K = 10.0 # Absolute LST change in Kelvin between consecutive clear views to be flagged as an outlier.
+
+# Parameter for 'iqr' (box plot) method
+LST_IQR_MULTIPLIER = 1.5 # The multiplier for the IQR to determine outlier bounds.
 
 # --- Spatial Sampling for Training ---
-SPATIAL_TRAINING_SAMPLE_PERCENTAGE = 0.1 # Fraction of pixels to use for training (1.0 = all pixels)
+SPATIAL_TRAINING_SAMPLE_PERCENTAGE = 1 # Fraction of pixels to use for training (1.0 = all pixels)
 MIN_PIXELS_FOR_SPATIAL_SAMPLING = 100     # Minimum number of pixels if SPATIAL_TRAINING_SAMPLE_PERCENTAGE < 1.0
 
 # --- ATC Model Hyperparameters ---

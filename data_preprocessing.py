@@ -285,6 +285,74 @@ def load_landsat_lst(
         else:
             print("No outliers found with trend_detect method.")
 
+    elif outlier_method == 'sudden_change':
+        threshold_k = getattr(app_config, 'LST_SUDDEN_CHANGE_THRESHOLD_K', 6.0)
+        print(f"Starting 'sudden_change' outlier removal with threshold {threshold_k} K. This can be slow.")
+        
+        _, height, width = lst_stack_nan.shape
+        total_outlier_mask = np.zeros_like(lst_stack_nan, dtype=bool)
+
+        for r in tqdm(range(height), desc="Sudden Change Detection (rows)"):
+            for c in range(width):
+                pixel_timeseries = lst_stack_nan[:, r, c]
+                valid_indices = np.where(~np.isnan(pixel_timeseries))[0]
+                
+                if len(valid_indices) < 2:
+                    continue
+
+                valid_values = pixel_timeseries[valid_indices]
+                
+                # Calculate differences between consecutive valid observations
+                diffs = np.diff(valid_values)
+                
+                # Find where the absolute difference exceeds the threshold.
+                # The outlier is the point *after* the large diff. So if diffs[i] is large,
+                # it means valid_values[i+1] is the outlier.
+                outlier_diff_indices = np.where(np.abs(diffs) > threshold_k)[0]
+                
+                if len(outlier_diff_indices) > 0:
+                    # The index in `valid_values` that is the outlier is `i+1`.
+                    # So the location in the `valid_indices` array is `outlier_diff_indices + 1`.
+                    outlier_locations_in_valid_indices = outlier_diff_indices + 1
+                    
+                    # Get the original time index from `valid_indices`.
+                    original_time_indices_of_outliers = valid_indices[outlier_locations_in_valid_indices]
+                    
+                    # Mark them in the final mask.
+                    total_outlier_mask[original_time_indices_of_outliers, r, c] = True
+
+        total_outliers_found = np.sum(total_outlier_mask)
+        if total_outliers_found > 0:
+            print(f"Found and removed {total_outliers_found} outliers using 'sudden_change' method.")
+            lst_stack_nan[total_outlier_mask] = np.nan
+        else:
+            print("No outliers found with 'sudden_change' method.")
+
+    elif outlier_method == 'iqr':
+        valid_lst_values = lst_stack_nan[~np.isnan(lst_stack_nan)]
+        if valid_lst_values.size > 0:
+            q1 = np.percentile(valid_lst_values, 25)
+            q3 = np.percentile(valid_lst_values, 75)
+            iqr = q3 - q1
+            multiplier = getattr(app_config, 'LST_IQR_MULTIPLIER', 1.5)
+            
+            lower_bound = q1 - multiplier * iqr
+            upper_bound = q3 + multiplier * iqr
+            
+            print(f"Using IQR method: Q1={q1:.2f}, Q3={q3:.2f}, IQR={iqr:.2f}, Multiplier={multiplier}")
+            print(f"Calculated outlier bounds: Lower={lower_bound:.2f}, Upper={upper_bound:.2f}")
+
+            outlier_mask = (lst_stack_nan < lower_bound) | (lst_stack_nan > upper_bound)
+            num_outliers = np.sum(outlier_mask)
+
+            if num_outliers > 0:
+                print(f"Removing {num_outliers} outlier pixels ({num_outliers / valid_lst_values.size * 100:.2f}% of valid data).")
+                lst_stack_nan[outlier_mask] = np.nan
+            else:
+                print("No outliers found using IQR method.")
+        else:
+            print("No valid LST data to perform outlier removal on.")
+
     elif outlier_method != 'none':
         print(f"Warning: Unknown LST_OUTLIER_METHOD '{outlier_method}'. Skipping outlier removal.")
     

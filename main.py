@@ -5,6 +5,8 @@ import numpy as np
 import torch
 import os
 import json
+import pandas as pd
+from typing import Dict, Tuple
 
 # Import project modules
 import config
@@ -14,6 +16,82 @@ import atc_model
 import gp_model
 import reconstruction
 import evaluation
+
+
+def split_data_by_date(preprocessed_data: Dict) -> Tuple[Dict, Dict]:
+    """
+    Split data into train (2015-2024) and test (2024-2025) sets based on dates.
+    This implements the same temporal split used in data_amount_analysis.py.
+    
+    Args:
+        preprocessed_data: Dictionary containing preprocessed data
+        
+    Returns:
+        Tuple of (train_data, test_data) dictionaries
+    """
+    print("Splitting data by date...")
+    
+    common_dates = preprocessed_data['common_dates']
+    
+    # Define date boundaries
+    train_start = pd.to_datetime("2015-01-01")
+    train_end = pd.to_datetime("2024-01-01")
+    test_start = pd.to_datetime("2024-01-01")
+    test_end = pd.to_datetime("2025-01-01")
+    
+    # Find indices for train and test sets
+    train_indices = []
+    test_indices = []
+    
+    for i, date in enumerate(common_dates):
+        if isinstance(date, str):
+            date = pd.to_datetime(date)
+        
+        if train_start <= date < train_end:
+            train_indices.append(i)
+        if test_start <= date < test_end:
+            test_indices.append(i)
+    
+    print(f"Train dates: {len(train_indices)} ({train_start} to {train_end})")
+    print(f"Test dates: {len(test_indices)} ({test_start} to {test_end})")
+    
+    if len(train_indices) == 0:
+        raise ValueError("No training data found in the specified date range")
+    if len(test_indices) == 0:
+        raise ValueError("No test data found in the specified date range")
+    
+    # Create train data subset
+    train_data = {}
+    for key, value in preprocessed_data.items():
+        if key == 'common_dates':
+            train_data[key] = [common_dates[i] for i in train_indices]
+        elif key in ['lst_stack', 'era5_stack', 's2_reflectance_stack', 'doy_stack']:
+            if hasattr(value, 'shape') and len(value.shape) >= 1:
+                train_data[key] = value[train_indices]
+            else:
+                train_data[key] = value
+        elif key == 'ndvi_stack' and value is not None:
+            train_data[key] = value[train_indices]
+        else:
+            train_data[key] = value
+    
+    # Create test data subset
+    test_data = {}
+    for key, value in preprocessed_data.items():
+        if key == 'common_dates':
+            test_data[key] = [common_dates[i] for i in test_indices]
+        elif key in ['lst_stack', 'era5_stack', 's2_reflectance_stack', 'doy_stack']:
+            if hasattr(value, 'shape') and len(value.shape) >= 1:
+                test_data[key] = value[test_indices]
+            else:
+                test_data[key] = value
+        elif key == 'ndvi_stack' and value is not None:
+            test_data[key] = value[test_indices]
+        else:
+            test_data[key] = value
+    
+    return train_data, test_data
+
 
 def main():
     """Main pipeline execution function."""
@@ -61,14 +139,25 @@ def main():
         print(f"  DIAGNOSTIC (PREPROCESSING): S2 reflectance stack has {s2_nan_count} NaNs out of {s2_total_count} values ({s2_nan_percentage:.2f}%).")
     # --- END DIAGNOSTIC BLOCK FOR PREPROCESSED DATA ---
 
-    # 2. Train ATC Model and Get Predictions/Variance
+    # 1.5. Split data into train and test sets
+    print("\nStep 1.5: Splitting data into train and test sets")
+    try:
+        train_data, test_data = split_data_by_date(preprocessed_data)
+    except Exception as e:
+        print(f"Error during data splitting: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    print("Data splitting completed.")
+
+    # 2. Train ATC Model and Get Predictions/Variance on Training Data
     print("\nStep 2: ATC Model Training and Prediction")
     try:
-        # Phase 2.1: Train ATC models and save snapshots
-        print("  Phase 2.1: Training ATC models and collecting snapshots/losses...")
+        # Phase 2.1: Train ATC models and save snapshots using TRAINING DATA
+        print("  Phase 2.1: Training ATC models and collecting snapshots/losses on training data...")
         # Now expects a dict of loss maps ('train', 'val')
         all_pixel_snapshots, interval_loss_maps = atc_model.train_and_collect_all_atc_snapshots(
-            preprocessed_data, config
+            train_data, config
         )
 
         # --- Plot Mean ATC Training and Validation Loss ---
@@ -88,7 +177,7 @@ def main():
                 mean_val_losses=list(mean_val_losses),
                 epoch_intervals_x_axis=epoch_ticks,
                 output_dir=config.OUTPUT_DIR,
-                roi_name=preprocessed_data.get('roi_name', 'UnknownROI'),
+                roi_name=train_data.get('roi_name', 'UnknownROI'),
                 loss_logging_interval=loss_logging_interval
             )
         else:
@@ -96,12 +185,12 @@ def main():
         # --- End Plot Mean ATC Loss ---
 
         # Define path for saving snapshots
-        snapshots_filename = f"atc_snapshots_{preprocessed_data.get('roi_name', 'all')}.npz"
+        snapshots_filename = f"atc_snapshots_{train_data.get('roi_name', 'all')}.npz"
         snapshots_filepath = os.path.join(config.MODEL_WEIGHTS_PATH, snapshots_filename)
         
         print(f"  Saving ATC snapshots to {snapshots_filepath}...")
         # Get image dimensions from one of the stacks, e.g., LST stack
-        _, height, width = preprocessed_data['lst_stack'].shape 
+        _, height, width = train_data['lst_stack'].shape 
         atc_model.save_atc_snapshots(
             all_pixel_snapshots, 
             snapshots_filepath,
@@ -111,16 +200,15 @@ def main():
         )
         print("  ATC snapshots saved.")
 
-        # Phase 2.2: Load ATC snapshots and predict
-        print("  Phase 2.2: Loading ATC snapshots and performing prediction...")
+        # Phase 2.2: Load ATC snapshots and predict on TEST DATA
+        print("  Phase 2.2: Loading ATC snapshots and performing prediction on test data...")
         loaded_snapshots_data = atc_model.load_atc_snapshots(snapshots_filepath)
         
-        # For prediction, we use the full timeline DOY and ERA5 from preprocessed_data
-        # as the target prediction timeline.
-        doy_for_prediction = preprocessed_data["doy_stack"]
-        era5_for_prediction = preprocessed_data["era5_stack"]
+        # For prediction, we use the TEST set DOY and ERA5 data
+        doy_for_prediction = test_data["doy_stack"]
+        era5_for_prediction = test_data["era5_stack"]
 
-        atc_mean_predictions, atc_variance = atc_model.predict_atc_from_loaded_snapshots(
+        atc_mean_predictions_test, atc_variance_test = atc_model.predict_atc_from_loaded_snapshots(
             loaded_snapshots_data,
             doy_for_prediction_numpy=doy_for_prediction,
             era5_for_prediction_numpy=era5_for_prediction,
@@ -128,39 +216,50 @@ def main():
         )
         
         # Optional: save ATC outputs (for debugging or intermediate results)
-        # utils.save_array_as_geotiff(atc_mean_predictions, preprocessed_data['reference_grid_path'], 
-        #                               os.path.join(config.OUTPUT_DIR, 'atc_mean_predictions.tif'))
-        # utils.save_array_as_geotiff(atc_variance, preprocessed_data['reference_grid_path'], 
-        #                               os.path.join(config.OUTPUT_DIR, 'atc_variance.tif'))
+        # utils.save_array_as_geotiff(atc_mean_predictions_test, test_data['reference_grid_path'], 
+        #                               os.path.join(config.OUTPUT_DIR, 'atc_mean_predictions_test.tif'))
+        # utils.save_array_as_geotiff(atc_variance_test, test_data['reference_grid_path'], 
+        #                               os.path.join(config.OUTPUT_DIR, 'atc_variance_test.tif'))
     except Exception as e:
         print(f"Error during ATC model training/prediction: {e}")
         import traceback
         traceback.print_exc()
         return
     print("ATC model processing completed.")
+    
     # --- START DIAGNOSTIC BLOCK FOR ATC ---
-    if 'lst_stack' in preprocessed_data and atc_mean_predictions is not None:
-        nan_in_lst_stack = np.isnan(preprocessed_data['lst_stack'])
-        nan_in_atc_pred = np.isnan(atc_mean_predictions)
+    if 'lst_stack' in test_data and atc_mean_predictions_test is not None:
+        nan_in_lst_stack = np.isnan(test_data['lst_stack'])
+        nan_in_atc_pred = np.isnan(atc_mean_predictions_test)
         total_nan_in_lst = np.sum(nan_in_lst_stack)
         total_nan_in_atc = np.sum(nan_in_atc_pred)
-        print(f"  DIAGNOSTIC: Total NaNs in input LST stack: {total_nan_in_lst}")
-        print(f"  DIAGNOSTIC: Total NaNs in ATC mean predictions: {total_nan_in_atc}")
+        print(f"  DIAGNOSTIC: Total NaNs in test LST stack: {total_nan_in_lst}")
+        print(f"  DIAGNOSTIC: Total NaNs in ATC mean predictions on test: {total_nan_in_atc}")
         if total_nan_in_lst > 0 and total_nan_in_atc > 0:
             matching_nans_atc = np.sum(nan_in_lst_stack & nan_in_atc_pred)
-            print(f"  DIAGNOSTIC: NaN locations in LST stack that are also NaN in ATC predictions: {matching_nans_atc}")
+            print(f"  DIAGNOSTIC: NaN locations in test LST stack that are also NaN in ATC predictions: {matching_nans_atc}")
             if matching_nans_atc > 0 and matching_nans_atc == total_nan_in_atc and matching_nans_atc >= np.sum(nan_in_lst_stack): # Check if all NaNs in ATC are from LST
                  print("  WARNING: ATC predictions appear to carry over NaNs from the input LST stack. Gap-filling by ATC may not be effective.")
         elif total_nan_in_atc == 0 and total_nan_in_lst > 0:
             print("  INFO: ATC predictions do not contain NaNs, suggesting it might be performing gap-filling.")
     # --- END DIAGNOSTIC BLOCK FOR ATC ---
 
-    # 3. Train GP Model for Residuals and Get Predictions/Variance
+    # 3. Train GP Model for Residuals using Training Data and Get Predictions on Test Data
     print("\nStep 3: GP Model Training for Residuals and Saving Model")
     try:
-        # Phase 3.1: Train GP model and save it (also saves interval losses internally)
+        # Phase 3.1: Train GP model and save it using TRAINING DATA
+        # We need ATC predictions on training data for GP training
+        print("  Phase 3.1a: Getting ATC predictions on training data for GP training...")
+        atc_mean_predictions_train, _ = atc_model.predict_atc_from_loaded_snapshots(
+            loaded_snapshots_data,
+            doy_for_prediction_numpy=train_data["doy_stack"],
+            era5_for_prediction_numpy=train_data["era5_stack"],
+            app_config=config
+        )
+        
+        print("  Phase 3.1b: Training GP model on training data...")
         gp_model.train_and_save_gp_model(
-            preprocessed_data, atc_mean_predictions, config
+            train_data, atc_mean_predictions_train, config
         )
         print("GP model training and saving completed.")
 
@@ -183,24 +282,24 @@ def main():
                 mean_interval_losses=gp_interval_losses, # Already a list of means
                 epoch_intervals_x_axis=gp_epoch_ticks,
                 output_dir=config.OUTPUT_DIR,
-                roi_name=preprocessed_data.get('roi_name', 'UnknownROI'),
+                roi_name=train_data.get('roi_name', 'UnknownROI'),
                 loss_logging_interval=gp_loss_logging_interval
             )
         else:
             print("  Skipping GP mean loss plot as interval losses were not found or loaded.")
         # --- End Plot Mean GP Training Loss ---
 
-        # Phase 3.2: Load GP model and predict residuals
-        print("\nStep 3.2: Loading GP Model and Predicting Residuals")
-        gp_mean_residuals_map, gp_variance_residuals_map = gp_model.load_and_predict_gp_residuals(
-            preprocessed_data, atc_mean_predictions, config
+        # Phase 3.2: Load GP model and predict residuals on TEST DATA
+        print("  Phase 3.2: Loading GP Model and Predicting Residuals on test data...")
+        gp_mean_residuals_map_test, gp_variance_residuals_map_test = gp_model.load_and_predict_gp_residuals(
+            test_data, atc_mean_predictions_test, config
         )
 
         # Optional: Save GP outputs (for debugging or intermediate results)
-        # utils.save_array_as_geotiff(gp_mean_residuals_map, preprocessed_data['reference_grid_path'], 
-        #                               os.path.join(config.OUTPUT_DIR, 'gp_mean_residuals_map.tif'))
-        # utils.save_array_as_geotiff(gp_variance_residuals_map, preprocessed_data['reference_grid_path'], 
-        #                               os.path.join(config.OUTPUT_DIR, 'gp_variance_residuals_map.tif'))
+        # utils.save_array_as_geotiff(gp_mean_residuals_map_test, test_data['reference_grid_path'], 
+        #                               os.path.join(config.OUTPUT_DIR, 'gp_mean_residuals_map_test.tif'))
+        # utils.save_array_as_geotiff(gp_variance_residuals_map_test, test_data['reference_grid_path'], 
+        #                               os.path.join(config.OUTPUT_DIR, 'gp_variance_residuals_map_test.tif'))
     except Exception as e:
         print(f"Error during GP model training/prediction: {e}")
         import traceback
@@ -208,17 +307,17 @@ def main():
         return
     print("GP model processing for residuals completed.")
 
-    # 4. Combine Predictions and Quantify Uncertainty
-    print("\nStep 4: Combining Predictions and Quantifying Uncertainty")
-    # This step produces the 'reconstructed_lst' that is used for saving and visualization,
+    # 4. Combine Predictions and Quantify Uncertainty for Test Data
+    print("\nStep 4: Combining Predictions and Quantifying Uncertainty on Test Data")
+    # This step produces the 'reconstructed_lst' for test data that is used for evaluation,
     # which correctly incorporates observed data for clear pixels.
     try:
-        reconstructed_lst, total_variance, ci_lower, ci_upper = reconstruction.combine_predictions(
-            atc_predictions=atc_mean_predictions,
-            atc_variance=atc_variance,
-            gp_mean_residuals_map=gp_mean_residuals_map,
-            gp_variance_residuals_map=gp_variance_residuals_map,
-            preprocessed_data=preprocessed_data,
+        reconstructed_lst_test, total_variance_test, ci_lower_test, ci_upper_test = reconstruction.combine_predictions(
+            atc_predictions=atc_mean_predictions_test,
+            atc_variance=atc_variance_test,
+            gp_mean_residuals_map=gp_mean_residuals_map_test,
+            gp_variance_residuals_map=gp_variance_residuals_map_test,
+            preprocessed_data=test_data,
             app_config=config
         )
     except Exception as e:
@@ -227,56 +326,57 @@ def main():
         traceback.print_exc()
         return
     print("Final reconstruction and uncertainty quantification completed.")
+    
     # --- START DIAGNOSTIC BLOCK FOR RECONSTRUCTION ---
-    if 'lst_stack' in preprocessed_data and reconstructed_lst is not None:
-        nan_in_lst_stack = np.isnan(preprocessed_data['lst_stack'])
-        nan_in_reconstructed = np.isnan(reconstructed_lst)
+    if 'lst_stack' in test_data and reconstructed_lst_test is not None:
+        nan_in_lst_stack = np.isnan(test_data['lst_stack'])
+        nan_in_reconstructed = np.isnan(reconstructed_lst_test)
         total_nan_in_lst = np.sum(nan_in_lst_stack)
         total_nan_in_reconstructed = np.sum(nan_in_reconstructed)
-        print(f"  DIAGNOSTIC: Total NaNs in input LST stack: {total_nan_in_lst}")
+        print(f"  DIAGNOSTIC: Total NaNs in test LST stack: {total_nan_in_lst}")
         print(f"  DIAGNOSTIC: Total NaNs in final reconstructed LST: {total_nan_in_reconstructed}")
         if total_nan_in_lst > 0 and total_nan_in_reconstructed > 0:
             matching_nans_reconstructed = np.sum(nan_in_lst_stack & nan_in_reconstructed)
-            print(f"  DIAGNOSTIC: NaN locations in LST stack that are also NaN in reconstructed LST: {matching_nans_reconstructed}")
+            print(f"  DIAGNOSTIC: NaN locations in test LST stack that are also NaN in reconstructed LST: {matching_nans_reconstructed}")
             if matching_nans_reconstructed > 0 and matching_nans_reconstructed == total_nan_in_reconstructed and matching_nans_reconstructed >= np.sum(nan_in_lst_stack):
                 print("  WARNING: Final reconstructed LST appears to carry over NaNs from the input LST stack. Overall gap-filling may not be effective.")
         elif total_nan_in_reconstructed == 0 and total_nan_in_lst > 0:
              print("  INFO: Final reconstructed LST does not contain NaNs, suggesting pipeline might be performing gap-filling.")
     # --- END DIAGNOSTIC BLOCK FOR RECONSTRUCTION ---
 
-    # 5. Save Reconstructed LST and Uncertainty Products
-    print("\nStep 5: Saving Outputs")
+    # 5. Save Reconstructed LST and Uncertainty Products for Test Data
+    print("\nStep 5: Saving Outputs for Test Data")
     try:
         # Save reconstructed LST for each time step
-        num_times = reconstructed_lst.shape[0]
-        dates = preprocessed_data['common_dates']
+        num_times = reconstructed_lst_test.shape[0]
+        dates = test_data['common_dates']
         for t in range(num_times):
             date_str = dates[t].strftime('%Y%m%d')
             
             # Reconstructed LST
-            recon_filename = os.path.join(config.RECONSTRUCTED_LST_PATH, f"LST_RECON_{date_str}.tif")
+            recon_filename = os.path.join(config.RECONSTRUCTED_LST_PATH, f"LST_RECON_TEST_{date_str}.tif")
             utils.save_array_as_geotiff(
-                data_array=reconstructed_lst[t, :, :],
-                reference_geotiff_path=preprocessed_data['reference_grid_path'],
+                data_array=reconstructed_lst_test[t, :, :],
+                reference_geotiff_path=test_data['reference_grid_path'],
                 output_path=recon_filename,
                 nodata_value=np.nan # Or a specific nodata value if preferred
             )
             
             # Total Variance
-            var_filename = os.path.join(config.UNCERTAINTY_MAPS_PATH, f"LST_TOTAL_VARIANCE_{date_str}.tif")
+            var_filename = os.path.join(config.UNCERTAINTY_MAPS_PATH, f"LST_TOTAL_VARIANCE_TEST_{date_str}.tif")
             utils.save_array_as_geotiff(
-                data_array=total_variance[t, :, :],
-                reference_geotiff_path=preprocessed_data['reference_grid_path'],
+                data_array=total_variance_test[t, :, :],
+                reference_geotiff_path=test_data['reference_grid_path'],
                 output_path=var_filename,
                 nodata_value=np.nan
             )
             
             # Confidence Intervals (Optional - can be large)
-            # ci_low_filename = os.path.join(config.UNCERTAINTY_MAPS_PATH, f"LST_CI_LOWER_{date_str}.tif")
-            # utils.save_array_as_geotiff(ci_lower[t,:,:], preprocessed_data['reference_grid_path'], ci_low_filename, nodata_value=np.nan)
-            # ci_up_filename = os.path.join(config.UNCERTAINTY_MAPS_PATH, f"LST_CI_UPPER_{date_str}.tif")
-            # utils.save_array_as_geotiff(ci_upper[t,:,:], preprocessed_data['reference_grid_path'], ci_up_filename, nodata_value=np.nan)
-        print(f"Saved reconstructed LST and variance maps to {config.RECONSTRUCTED_LST_PATH} and {config.UNCERTAINTY_MAPS_PATH}")
+            # ci_low_filename = os.path.join(config.UNCERTAINTY_MAPS_PATH, f"LST_CI_LOWER_TEST_{date_str}.tif")
+            # utils.save_array_as_geotiff(ci_lower_test[t,:,:], test_data['reference_grid_path'], ci_low_filename, nodata_value=np.nan)
+            # ci_up_filename = os.path.join(config.UNCERTAINTY_MAPS_PATH, f"LST_CI_UPPER_TEST_{date_str}.tif")
+            # utils.save_array_as_geotiff(ci_upper_test[t,:,:], test_data['reference_grid_path'], ci_up_filename, nodata_value=np.nan)
+        print(f"Saved reconstructed LST and variance maps for test data to {config.RECONSTRUCTED_LST_PATH} and {config.UNCERTAINTY_MAPS_PATH}")
 
     except Exception as e:
         print(f"Error during saving outputs: {e}")
@@ -287,33 +387,33 @@ def main():
     # Create the 'model_predictions_for_eval' for fair evaluation
     # This represents the model's raw output before merging with observed data.
     print("\nPreparing model's raw predictions for evaluation purposes...")
-    # Start with ATC predictions
-    model_predictions_for_eval = np.copy(atc_mean_predictions)
+    # Start with ATC predictions on test data
+    model_predictions_for_eval = np.copy(atc_mean_predictions_test)
     
     # Add GP residuals where they are valid
-    # If gp_mean_residuals_map is None or all NaN (e.g. GP failed/skipped), this won't add anything or add NaNs
-    if gp_mean_residuals_map is not None:
-        # Ensure gp_mean_residuals_map is not all NaNs before attempting to add
-        if not np.all(np.isnan(gp_mean_residuals_map)):
-            # Where gp_mean_residuals_map is NaN, adding it will result in NaN, which is fine.
-            # Where atc_mean_predictions is NaN, result will be NaN.
-            model_predictions_for_eval = atc_mean_predictions + gp_mean_residuals_map
+    # If gp_mean_residuals_map_test is None or all NaN (e.g. GP failed/skipped), this won't add anything or add NaNs
+    if gp_mean_residuals_map_test is not None:
+        # Ensure gp_mean_residuals_map_test is not all NaNs before attempting to add
+        if not np.all(np.isnan(gp_mean_residuals_map_test)):
+            # Where gp_mean_residuals_map_test is NaN, adding it will result in NaN, which is fine.
+            # Where atc_mean_predictions_test is NaN, result will be NaN.
+            model_predictions_for_eval = atc_mean_predictions_test + gp_mean_residuals_map_test
         else:
             print("  GP mean residuals map is all NaN; using only ATC predictions for model evaluation output.")
-            # model_predictions_for_eval already holds atc_mean_predictions
+            # model_predictions_for_eval already holds atc_mean_predictions_test
     else:
         print("  GP mean residuals map is None; using only ATC predictions for model evaluation output.")
-        # model_predictions_for_eval already holds atc_mean_predictions
+        # model_predictions_for_eval already holds atc_mean_predictions_test
 
-    # 6. Evaluate Model Performance
-    print("\nStep 6: Model Evaluation")
+    # 6. Evaluate Model Performance on Test Data
+    print("\nStep 6: Model Evaluation on Test Data")
     try:
         all_eval_metrics = evaluation.run_all_evaluations(
-            model_predicted_lst=model_predictions_for_eval, # Use the model's raw predictions
-            observed_lst_clear=preprocessed_data['lst_stack'], # Original LST with NaNs for clouds
+            model_predicted_lst=model_predictions_for_eval, # Use the model's raw predictions on test data
+            observed_lst_clear=test_data['lst_stack'], # Original test LST with NaNs for clouds
             app_config=config
         )
-        print("\nFinal Evaluation Metrics:")
+        print("\nFinal Evaluation Metrics (Test Data):")
         for k, v in all_eval_metrics.items():
             print(f"  {k}: {v}")
     except Exception as e:
@@ -321,27 +421,27 @@ def main():
         import traceback
         traceback.print_exc()
 
-    # Visualize daily comparison stacks (Observed LST, Reconstructed LST, S2 RGB)
-    if reconstructed_lst.shape[0] > 0 and \
-       preprocessed_data.get('lst_stack') is not None and \
-       preprocessed_data.get('s2_reflectance_stack') is not None and \
-       preprocessed_data.get('common_dates'):
-        print("\nVisualizing daily comparison stacks (Observed LST vs Predicted LST vs Reconstructed LST)...")
+    # Visualize daily comparison stacks (Observed LST, Reconstructed LST, S2 RGB) for test data
+    if reconstructed_lst_test.shape[0] > 0 and \
+       test_data.get('lst_stack') is not None and \
+       test_data.get('s2_reflectance_stack') is not None and \
+       test_data.get('common_dates'):
+        print("\nVisualizing daily comparison stacks for test data (Observed LST vs Predicted LST vs Reconstructed LST)...")
         try:
             # Assuming S2 bands are [B2, B3, B4, B8], so RGB indices are (B4=2, B3=1, B2=0)
             s2_rgb_indices_param = getattr(config, 'S2_RGB_INDICES', (2, 1, 0)) 
             max_days_plot_param = getattr(config, 'MAX_DAYS_FOR_DAILY_VISUALIZATION_PLOT', 10)
 
             utils.visualize_daily_stacks_comparison(
-                lst_observed_stack=preprocessed_data['lst_stack'],
+                lst_observed_stack=test_data['lst_stack'],
                 model_predicted_lst_stack=model_predictions_for_eval, # ADDED: Pass model's direct predictions
-                reconstructed_lst_stack=reconstructed_lst,
-                era5_stack=preprocessed_data['era5_stack'], # ADDED: Pass ERA5 stack
-                s2_reflectance_stack=preprocessed_data['s2_reflectance_stack'],
-                ndvi_stack=preprocessed_data.get('ndvi_stack'), # Pass NDVI stack, could be None
-                common_dates=preprocessed_data['common_dates'],
+                reconstructed_lst_stack=reconstructed_lst_test,
+                era5_stack=test_data['era5_stack'], # ADDED: Pass ERA5 stack
+                s2_reflectance_stack=test_data['s2_reflectance_stack'],
+                ndvi_stack=test_data.get('ndvi_stack'), # Pass NDVI stack, could be None
+                common_dates=test_data['common_dates'],
                 output_base_dir=config.OUTPUT_DIR, 
-                roi_name=preprocessed_data.get('roi_name', 'UnknownROI'),
+                roi_name=test_data.get('roi_name', 'UnknownROI'),
                 app_config=config, # Pass the config object
                 s2_rgb_indices=s2_rgb_indices_param,
                 max_days_to_plot=max_days_plot_param
@@ -367,6 +467,27 @@ def main():
         print(f"Error saving run configuration: {e}")
         import traceback
         traceback.print_exc()
+
+    # Save data split information
+    print("\nStep 8: Saving Data Split Information")
+    try:
+        split_info = {
+            'train_dates': [date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date) for date in train_data['common_dates']],
+            'test_dates': [date.strftime('%Y-%m-%d') if hasattr(date, 'strftime') else str(date) for date in test_data['common_dates']],
+            'train_count': len(train_data['common_dates']),
+            'test_count': len(test_data['common_dates']),
+            'train_date_range': f"2015-01-01 to 2024-01-01",
+            'test_date_range': f"2024-01-01 to 2025-01-01"
+        }
+        split_info_filename = os.path.join(config.OUTPUT_DIR, 'data_split_info.json')
+        with open(split_info_filename, 'w') as f:
+            json.dump(split_info, f, indent=4)
+        print(f"Data split information saved to {split_info_filename}")
+    except Exception as e:
+        print(f"Error saving data split information: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 if __name__ == '__main__':
     # Before running, ensure that:
