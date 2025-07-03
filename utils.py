@@ -377,14 +377,21 @@ def visualize_daily_stacks_comparison(
         print("Matplotlib is not installed. Skipping daily stacks comparison visualization.")
         return
 
-    num_available_days = lst_observed_stack.shape[0]
-    num_days = min(num_available_days, max_days_to_plot)
+    # Determine the number of days to plot
+    num_days_to_plot = min(lst_observed_stack.shape[0], max_days_to_plot)
 
-    if num_days == 0:
-        print("No data available to visualize for daily stacks comparison.")
-        return
-
-    fig, axes = plt.subplots(6, num_days, figsize=(num_days * 3.5, 6 * 3), squeeze=False) # Changed to 6 rows, adjusted figsize
+    # Global LST range for consistent color scaling (now removed)
+    # all_lst_values = np.concatenate([
+    #     lst_observed_stack.flatten(),
+    #     model_predicted_lst_stack.flatten(),
+    #     reconstructed_lst_stack.flatten()
+    # ])
+    # lst_min_val = np.nanmin(all_lst_values) if not np.all(np.isnan(all_lst_values)) else 273
+    # lst_max_val = np.nanmax(all_lst_values) if not np.all(np.isnan(all_lst_values)) else 313
+    
+    # Create subplots
+    # Number of rows is now dynamic based on what data is available
+    fig, axes = plt.subplots(6, num_days_to_plot, figsize=(num_days_to_plot * 3.5, 6 * 3), squeeze=False) # Changed to 6 rows, adjusted figsize
     # squeeze=False ensures axes is always 2D, even if num_days=1
     
     plot_title_suffix = "S2 RGB"
@@ -393,64 +400,52 @@ def visualize_daily_stacks_comparison(
 
     fig.suptitle(f"Daily Comparison for {roi_name} (Obs, Pred, Recon LST, ERA5 B1, ERA5 B2, {plot_title_suffix})", fontsize=14, y=0.99) # Adjusted title and y
 
-    # Determine common min/max for LST plots for consistent color scaling across days
-    valid_obs_lst_values = lst_observed_stack[~np.isnan(lst_observed_stack)]
-    valid_pred_lst_values = model_predicted_lst_stack[~np.isnan(model_predicted_lst_stack)]
-    valid_recon_lst_values = reconstructed_lst_stack[~np.isnan(reconstructed_lst_stack)]
-    
-    lst_min_val, lst_max_val = (270, 320) # Default fallback
-
-    # Combine all valid LST values for consistent scaling
-    all_valid_lst_for_scaling = []
-    if valid_obs_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_obs_lst_values)
-    if valid_pred_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_pred_lst_values)
-    if valid_recon_lst_values.size > 0: all_valid_lst_for_scaling.append(valid_recon_lst_values)
-
-    if all_valid_lst_for_scaling:
-        combined_lst_values = np.concatenate(all_valid_lst_for_scaling)
-        if lst_contrast_percentiles and len(lst_contrast_percentiles) == 2:
-            p_low, p_high = lst_contrast_percentiles
-            lst_min_val = np.percentile(combined_lst_values, p_low)
-            lst_max_val = np.percentile(combined_lst_values, p_high)
-            print(f"LST visualization (Obs/Pred/Recon): Using percentile ({p_low}%, {p_high}%) scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
-        else:
-            lst_min_val = np.min(combined_lst_values)
-            lst_max_val = np.max(combined_lst_values)
-            print(f"LST visualization (Obs/Pred/Recon): Using absolute min/max scaling: min={lst_min_val:.2f}, max={lst_max_val:.2f}")
-    
-    # Ensure min_val is not greater than max_val after percentile clipping, can happen with near-constant images
-    if lst_min_val >= lst_max_val:
-        lst_min_val = lst_max_val - 1 # Arbitrary small difference to make imshow happy
-        print(f"Warning: LST min_val >= max_val after percentile clip. Adjusted to min={lst_min_val:.2f}, max={lst_max_val:.2f}")
-
-    for i in range(num_days):
+    for i in range(num_days_to_plot):
         date_str = common_dates[i].strftime('%Y-%m-%d')
         
+        # --- Calculate vmin and vmax for this iteration only ---
+        iter_obs_lst = lst_observed_stack[i]
+        iter_pred_lst = model_predicted_lst_stack[i]
+        iter_recon_lst = reconstructed_lst_stack[i]
+        
+        iter_all_values = np.concatenate([
+            iter_obs_lst.flatten(),
+            iter_pred_lst.flatten(),
+            iter_recon_lst.flatten()
+        ])
+        
+        iter_min_val = np.nanmin(iter_all_values)
+        iter_max_val = np.nanmax(iter_all_values)
+
+        if not np.isfinite(iter_min_val) or not np.isfinite(iter_max_val):
+            iter_min_val, iter_max_val = 273, 313 # Default fallback
+        # --- End of dynamic vmin/vmax calculation ---
+
         # Row 0: Observed LST
         ax_obs = axes[0, i]
-        im_obs = ax_obs.imshow(lst_observed_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
-        ax_obs.set_title(f"{date_str}\nObserved LST (K)")
+        im_obs = ax_obs.imshow(iter_obs_lst, cmap='coolwarm', vmin=iter_min_val, vmax=iter_max_val)
+        ax_obs.set_title(f"{date_str}\\nObserved LST (K)")
         ax_obs.axis('off')
         if i == 0: ax_obs.set_ylabel("Observed LST", fontsize=12)
 
         # Row 1: Model Predicted LST
         ax_pred = axes[1, i]
-        im_pred = ax_pred.imshow(model_predicted_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+        im_pred = ax_pred.imshow(iter_pred_lst, cmap='coolwarm', vmin=iter_min_val, vmax=iter_max_val)
         ax_pred.set_title(f"Model Predicted LST (K)")
         ax_pred.axis('off')
         if i == 0: ax_pred.set_ylabel("Predicted LST", fontsize=12)
 
         # Row 2: Reconstructed LST
         ax_recon = axes[2, i]
-        im_recon = ax_recon.imshow(reconstructed_lst_stack[i], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
-        ax_recon.set_title(f"Reconstructed LST (K)") 
+        im_recon = ax_recon.imshow(iter_recon_lst, cmap='coolwarm', vmin=iter_min_val, vmax=iter_max_val)
+        ax_recon.set_title(f"Reconstructed LST (K)\\n(Range: {iter_min_val:.1f} - {iter_max_val:.1f})") 
         ax_recon.axis('off')
         if i == 0: ax_recon.set_ylabel("Reconstructed LST", fontsize=12)
 
         # Row 3: ERA5 Band 1
         ax_era1 = axes[3, i]
         if era5_stack is not None and era5_stack.shape[0] > i and era5_stack.shape[1] > 0:
-            im_era1 = ax_era1.imshow(era5_stack[i, 0, :, :], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+            im_era1 = ax_era1.imshow(era5_stack[i, 0, :, :], cmap='coolwarm', vmin=iter_min_val, vmax=iter_max_val)
             ax_era1.set_title(f"ERA5 Band 1 (K)")
         else:
             ax_era1.text(0.5, 0.5, 'ERA5 B1 N/A', ha='center', va='center')
@@ -461,7 +456,7 @@ def visualize_daily_stacks_comparison(
         # Row 4: ERA5 Band 2
         ax_era2 = axes[4, i]
         if era5_stack is not None and era5_stack.shape[0] > i and era5_stack.shape[1] > 1:
-            im_era2 = ax_era2.imshow(era5_stack[i, 1, :, :], cmap='coolwarm', vmin=lst_min_val, vmax=lst_max_val)
+            im_era2 = ax_era2.imshow(era5_stack[i, 1, :, :], cmap='coolwarm', vmin=iter_min_val, vmax=iter_max_val)
             ax_era2.set_title(f"ERA5 Band 2 (K)")
         else:
             ax_era2.text(0.5, 0.5, 'ERA5 B2 N/A', ha='center', va='center')
@@ -492,28 +487,16 @@ def visualize_daily_stacks_comparison(
             y_label_row5 = "NDVI" if use_ndvi_plot and ndvi_stack is not None else "S2 RGB"
             ax_s2_or_ndvi.set_ylabel(y_label_row5, fontsize=12)
 
-    # Add a single colorbar for LST plots, if desired, or individual ones are fine too.
-    # For simplicity, no shared colorbar here. Each plot implicitly shows its scale via vmin/vmax.
-    # If a shared colorbar is needed:
-    # fig.colorbar(im_recon, ax=axes.ravel().tolist(), shrink=0.6, aspect=30, orientation='horizontal', label='Temperature (K)', pad=0.05)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.97]) # Adjust layout for suptitle
-
-    viz_output_dir = os.path.join(output_base_dir, "viz")
-    os.makedirs(viz_output_dir, exist_ok=True)
-    filename = os.path.join(viz_output_dir, f"daily_comparison_{roi_name}.jpg")
+    # Final layout adjustment
+    plt.tight_layout(rect=[0, 0, 0.9, 1]) # Adjust rect to prevent title overlap
     
+    # Save the figure
+    output_filename = os.path.join(output_base_dir, f"daily_comparison_stacks_{roi_name}.png")
     try:
-        plt.savefig(filename, dpi=150, format='jpg', quality=90)
-        print(f"Saved daily comparison visualization to {filename}")
+        plt.savefig(output_filename, dpi=150, format='png')
+        print(f"Saved daily comparison visualization to {output_filename}")
     except Exception as e:
-        print(f"Error saving daily comparison plot as JPG: {e}. Trying PNG...")
-        try:
-            png_filename = os.path.join(viz_output_dir, f"daily_comparison_{roi_name}.png")
-            plt.savefig(png_filename, dpi=150, format='png')
-            print(f"Saved daily comparison visualization to {png_filename}")
-        except Exception as ep:
-            print(f"Error saving daily comparison plot as PNG: {ep}")
+        print(f"Error saving daily comparison plot: {e}")
             
     plt.close(fig) # Close the figure to free memory 
 

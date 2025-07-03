@@ -7,10 +7,10 @@ import datetime
 
 # --- User Defined Paths for a Single ROI --- 
 # Base directory containing all ROI folders
-BASE_DATA_DIR = "/mnt/hdd12tb/code/nhatvm/DELAG/DELAG_LST/download_data_v3" # USER TO VERIFY/SET THIS
+BASE_DATA_DIR = "/mnt/hdd12tb/code/nhatvm/DELAG/data_grid_base" # USER TO VERIFY/SET THIS
 
 # Name of the specific ROI folder to process from BASE_DATA_DIR
-ROI_NAME = "KhanhXuan_BuonMaThuot_DakLak" # USER TO SET THIS to one of the subfolders
+ROI_NAME = "TayNguyen_grid_336" # USER TO SET THIS to one of the subfolders
 
 # Construct full paths for the selected ROI
 ROI_BASE_PATH = os.path.join(BASE_DATA_DIR, ROI_NAME)
@@ -100,11 +100,14 @@ ATC_ENSEMBLE_SNAPSHOTS = 200
 ATC_SNAPSHOT_INTERVAL = 4 # Save every 4 epochs
 ATC_ENSEMBLE_START_EPOCH = ATC_EPOCHS - (ATC_ENSEMBLE_SNAPSHOTS * ATC_SNAPSHOT_INTERVAL)
 MIN_CLEAR_OBS_ATC = 30 # Minimum number of clear sky observations to train an ATC model for a pixel
-ATC_N_JOBS = 16  # Use all available CPU cores for ATC training. Set to 1 for no parallelization, or a specific number e.g., 4.
+ATC_N_JOBS = 32  # Use all available CPU cores for ATC training. Set to 1 for no parallelization, or a specific number e.g., 4.
 ATC_LOSS_LOGGING_INTERVAL = 100 # Log loss every N epochs for map generation
 
-# --- GP Model Hyperparameters ---
-# S2 bands will be annual/period means: Red, Green, Blue, NIR
+# --- GP Model Configuration
+# --------------------------------------------------------------------------
+USE_GP_MODEL = True # Master switch to enable/disable GP model training and prediction
+
+# Number of inducing points for the sparse GP model.
 GP_RESIDUAL_FEATURES = ['s2_red_mean', 's2_green_mean', 's2_blue_mean', 's2_nir_mean', 'norm_x', 'norm_y']
 GP_LEARNING_RATE_INITIAL = 0.05
 GP_EPOCHS_INITIAL = 50

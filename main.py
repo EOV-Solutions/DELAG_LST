@@ -244,68 +244,65 @@ def main():
             print("  INFO: ATC predictions do not contain NaNs, suggesting it might be performing gap-filling.")
     # --- END DIAGNOSTIC BLOCK FOR ATC ---
 
-    # 3. Train GP Model for Residuals using Training Data and Get Predictions on Test Data
-    print("\nStep 3: GP Model Training for Residuals and Saving Model")
-    try:
-        # Phase 3.1: Train GP model and save it using TRAINING DATA
-        # We need ATC predictions on training data for GP training
-        print("  Phase 3.1a: Getting ATC predictions on training data for GP training...")
-        atc_mean_predictions_train, _ = atc_model.predict_atc_from_loaded_snapshots(
-            loaded_snapshots_data,
-            doy_for_prediction_numpy=train_data["doy_stack"],
-            era5_for_prediction_numpy=train_data["era5_stack"],
-            app_config=config
-        )
-        
-        print("  Phase 3.1b: Training GP model on training data...")
-        gp_model.train_and_save_gp_model(
-            train_data, atc_mean_predictions_train, config
-        )
-        print("GP model training and saving completed.")
-
-        # --- Plot Mean GP Training Loss ---
-        gp_model_filepath = os.path.join(config.MODEL_WEIGHTS_PATH, config.GP_MODEL_WEIGHT_FILENAME)
-        gp_interval_losses = gp_model.load_gp_interval_losses(gp_model_filepath)
-        
-        if gp_interval_losses:
-            num_gp_intervals = len(gp_interval_losses)
-            gp_loss_logging_interval = getattr(config, 'GP_LOSS_LOGGING_INTERVAL', 10)
-            # Calculate epoch ticks based on total epochs for GP = GP_EPOCHS_INITIAL + GP_EPOCHS_FINAL
-            total_gp_epochs = config.GP_EPOCHS_INITIAL + config.GP_EPOCHS_FINAL
-            gp_epoch_ticks = [(i + 1) * gp_loss_logging_interval for i in range(num_gp_intervals)]
-            # Cap ticks at total_gp_epochs if needed, though interval logic should align
-            if gp_epoch_ticks and gp_epoch_ticks[-1] > total_gp_epochs and num_gp_intervals * gp_loss_logging_interval > total_gp_epochs:
-                 # This can happen if the last interval is partial. The plot x-label clarifies.
-                 pass 
-
-            utils.plot_mean_gp_loss_over_intervals(
-                mean_interval_losses=gp_interval_losses, # Already a list of means
-                epoch_intervals_x_axis=gp_epoch_ticks,
-                output_dir=config.OUTPUT_DIR,
-                roi_name=train_data.get('roi_name', 'UnknownROI'),
-                loss_logging_interval=gp_loss_logging_interval
+    # 3. Train and Predict with GP Model for Residuals (if enabled)
+    if config.USE_GP_MODEL:
+        print("\nStep 3: GP Model Training for Residuals and Saving Model (USE_GP_MODEL is True)")
+        try:
+            # Phase 3.1: Train GP model and save it using TRAINING DATA
+            # We need ATC predictions on training data for GP training
+            print("  Phase 3.1a: Getting ATC predictions on training data for GP training...")
+            atc_mean_predictions_train, _ = atc_model.predict_atc_from_loaded_snapshots(
+                loaded_snapshots_data,
+                doy_for_prediction_numpy=train_data["doy_stack"],
+                era5_for_prediction_numpy=train_data["era5_stack"],
+                app_config=config
             )
-        else:
-            print("  Skipping GP mean loss plot as interval losses were not found or loaded.")
-        # --- End Plot Mean GP Training Loss ---
+            
+            print("  Phase 3.1b: Training GP model on training data...")
+            gp_model.train_and_save_gp_model(
+                train_data, atc_mean_predictions_train, config
+            )
+            print("  GP model training and saving completed.")
 
-        # Phase 3.2: Load GP model and predict residuals on TEST DATA
-        print("  Phase 3.2: Loading GP Model and Predicting Residuals on test data...")
-        gp_mean_residuals_map_test, gp_variance_residuals_map_test = gp_model.load_and_predict_gp_residuals(
-            test_data, atc_mean_predictions_test, config
-        )
+            # --- Plot Mean GP Training Loss ---
+            gp_model_filepath = os.path.join(config.MODEL_WEIGHTS_PATH, config.GP_MODEL_WEIGHT_FILENAME)
+            gp_interval_losses = gp_model.load_gp_interval_losses(gp_model_filepath)
+            if gp_interval_losses:
+                # Plotting logic for GP...
+                num_gp_intervals = len(gp_interval_losses)
+                gp_loss_logging_interval = getattr(config, 'GP_LOSS_LOGGING_INTERVAL', 10)
+                total_gp_epochs = config.GP_EPOCHS_INITIAL + config.GP_EPOCHS_FINAL
+                gp_epoch_ticks = [(i + 1) * gp_loss_logging_interval for i in range(num_gp_intervals)]
+                utils.plot_mean_gp_loss_over_intervals(
+                    mean_interval_losses=gp_interval_losses,
+                    epoch_intervals_x_axis=gp_epoch_ticks,
+                    output_dir=config.OUTPUT_DIR,
+                    roi_name=train_data.get('roi_name', 'UnknownROI'),
+                    loss_logging_interval=gp_loss_logging_interval
+                )
+            else:
+                print("  Skipping GP mean loss plot as interval losses were not found or loaded.")
+            # --- End Plot Mean GP Training Loss ---
 
-        # Optional: Save GP outputs (for debugging or intermediate results)
-        # utils.save_array_as_geotiff(gp_mean_residuals_map_test, test_data['reference_grid_path'], 
-        #                               os.path.join(config.OUTPUT_DIR, 'gp_mean_residuals_map_test.tif'))
-        # utils.save_array_as_geotiff(gp_variance_residuals_map_test, test_data['reference_grid_path'], 
-        #                               os.path.join(config.OUTPUT_DIR, 'gp_variance_residuals_map_test.tif'))
-    except Exception as e:
-        print(f"Error during GP model training/prediction: {e}")
-        import traceback
-        traceback.print_exc()
-        return
-    print("GP model processing for residuals completed.")
+            # Phase 3.2: Load GP model and predict residuals on TEST DATA
+            print("  Phase 3.2: Loading GP Model and Predicting Residuals on test data...")
+            gp_mean_residuals_map_test, gp_variance_residuals_map_test = gp_model.load_and_predict_gp_residuals(
+                test_data, atc_mean_predictions_test, config
+            )
+            print("  GP model processing for residuals completed.")
+
+        except Exception as e:
+            print(f"Error during GP model training/prediction: {e}")
+            import traceback
+            traceback.print_exc()
+            print("  WARNING: Falling back to ATC-only prediction due to an error in the GP module.")
+            gp_mean_residuals_map_test = np.zeros_like(atc_mean_predictions_test)
+            gp_variance_residuals_map_test = np.zeros_like(atc_mean_predictions_test)
+    else:
+        print("\nStep 3: Skipping GP Model processing (USE_GP_MODEL is False)")
+        # If GP is disabled, residuals are zero, and their variance is zero.
+        gp_mean_residuals_map_test = np.zeros_like(atc_mean_predictions_test)
+        gp_variance_residuals_map_test = np.zeros_like(atc_mean_predictions_test)
 
     # 4. Combine Predictions and Quantify Uncertainty for Test Data
     print("\nStep 4: Combining Predictions and Quantifying Uncertainty on Test Data")

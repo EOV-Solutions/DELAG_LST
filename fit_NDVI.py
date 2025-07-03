@@ -82,7 +82,14 @@ def fit_ndvi_to_lst(lst_dates, ndvi_date_files, window_days):
 
 def main(data_dir, window_days):
     lst_dir = os.path.join(data_dir, 'lst')
-    ndvi_dir = os.path.join(data_dir, 'ndvi_infer')
+    # ndvi_dir = os.path.join(data_dir, 'ndvi_infer')
+    ndvi_dir = None
+    for folder in os.listdir(data_dir):
+        if os.path.isdir(os.path.join(data_dir, folder)):
+            if "ndvi8days" in folder:
+                ndvi_dir = os.path.join(data_dir, folder)
+                break
+    
 
     if not os.path.isdir(lst_dir):
         print(f"Error: LST directory not found: {lst_dir}")
@@ -143,19 +150,39 @@ def main(data_dir, window_days):
     print("NDVI fitting to LST timesteps completed.")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description="Fit NDVI inference files to LST time steps by renaming and cleanup"
-    )
-    parser.add_argument(
-        '--data-dir',
-        required=True,
-        help="Path to the data directory containing 'lst' and 'ndvi_infer_8days' subdirectories"
-    )
-    parser.add_argument(
-        '--window',
-        type=int,
-        default=4,
-        help="Window (in days) around NDVI dates to search for matching LST dates"
-    )
-    args = parser.parse_args()
-    main(args.data_dir, args.window)
+    # parser = argparse.ArgumentParser(
+    #     description="Fit NDVI inference files to LST time steps by renaming and cleanup"
+    # )
+    # parser.add_argument(
+    #     '--data-dir',
+    #     required=True,
+    #     help="Path to the data directory containing 'lst' and 'ndvi_infer_8days' subdirectories"
+    # )
+    # parser.add_argument(
+    #     '--window',
+    #     type=int,
+    #     default=4,
+    #     help="Window (in days) around NDVI dates to search for matching LST dates"
+    # )
+    # args = parser.parse_args()
+    # main(args.data_dir, args.window)
+    
+    data_dir = "/mnt/hdd12tb/code/nhatvm/DELAG/data_grid_base"
+    for roi in os.listdir(data_dir):
+        if roi == 'output_models':
+            continue
+        lst_dir = os.path.join(data_dir, roi, 'lst')
+        ndvi_dir = None
+        for folder in os.listdir(os.path.join(data_dir, roi)):
+            if os.path.isdir(os.path.join(data_dir, roi, folder)):
+                if "ndvi8days" in folder:
+                    ndvi_dir = os.path.join(data_dir, roi, folder)
+                    break
+        if not os.path.isdir(lst_dir):
+            print(f"Error: LST directory not found: {lst_dir}")
+            continue
+        if not os.path.isdir(ndvi_dir):
+            print(f"Error: NDVI directory not found: {ndvi_dir}")
+            continue
+        main(os.path.join(data_dir, roi), 4)
+        

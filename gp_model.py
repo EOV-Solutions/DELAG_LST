@@ -522,10 +522,10 @@ if __name__ == '__main__':
             self.DEVICE = "cpu" # General device setting
             self.ATC_DEVICE = "cpu" # Specific for ATC (not used directly in GP tests)
             self.GP_DEVICE = "cpu"  # Specific for GP
-            self.GP_NUM_INDUCING_POINTS = 64 # Smaller for faster test
+            self.GP_NUM_INDUCING_POINTS = 32 # Smaller for faster test
             self.GP_EPOCHS_INITIAL = 3 # Minimal epochs for test
             self.GP_EPOCHS_FINAL = 2   # Minimal epochs for test
-            self.GP_MINI_BATCH_SIZE = 128
+            self.GP_MINI_BATCH_SIZE = 1024
             self.GP_LEARNING_RATE_INITIAL = 0.01
             self.GP_LEARNING_RATE_FINAL = 0.001
             # Define GP_RESIDUAL_FEATURES to match dummy data: 4 S2 bands + 2 coords
